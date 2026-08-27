@@ -368,7 +368,7 @@ def command_for(action, wave=None):
     if action.startswith("app:") and desktop_file_exists(action[4:]):
         return ["uwsm-app", "--", "gtk-launch", action[4:]]
     return {
-      "terminal": ["uwsm-app", "--", "kitty"], "browser": ["omarchy", "launch", "browser"],
+      "terminal": ["uwsm-app", "--", "xdg-terminal-exec"], "browser": ["omarchy", "launch", "browser"],
       "files": ["uwsm-app", "--", "xdg-open", home], "mic_mute": ["wpctl", "set-mute", mic_target, "toggle"],
       "mic_up": ["wpctl", "set-volume", mic_target, "5%+"], "mic_down": ["wpctl", "set-volume", mic_target, "5%-"],
       "volume_mute": ["wpctl", "set-mute", "@DEFAULT_AUDIO_SINK@", "toggle"], "volume_up": ["wpctl", "set-volume", "-l", "1.5", "@DEFAULT_AUDIO_SINK@", "5%+"],
