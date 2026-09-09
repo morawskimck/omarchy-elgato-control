@@ -8,6 +8,8 @@ Current version: **0.3.1**
 ## Supported hardware
 
 - Stream Deck Plus (`0fd9:0084`): eight keys, four dials, 120×120 JPEG artwork, device brightness, and an 800×100 live dial LCD
+- Stream Deck MK.2 (`0fd9:0080`, also `00a5`/`00b9`) and Stream Deck Original V2 (`0fd9:006d`): fifteen keys (5×3), 72×72 JPEG artwork rotated 180° for the panel firmware, and device brightness
+- Stream Deck XL (`0fd9:006c`/`008f`): thirty-two keys (8×4), 96×96 artwork, and device brightness (untested — derived from the same gen-2 protocol)
 - Stream Deck Pedal (`0fd9:0086`): three pedal events
 - Elgato Key Light Neo: automatic mDNS discovery, grouped power, brightness, temperature, and live status
 - Wave:3: automatic PipeWire detection; microphone actions target the detected Wave source rather than an unrelated default microphone

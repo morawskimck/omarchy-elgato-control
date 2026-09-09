@@ -13,11 +13,17 @@ Panel {
   property var anchorItem: null
   property var hostWidget: null
   readonly property var barIdentity: hostWidget || root
-  property var status: ({ running: false, plus: null, pedal: null, profile: "Omarchy Default", brightness: 55 })
+  property var status: ({ running: false, plus: null, deck: null, pedal: null, profile: "Omarchy Default", brightness: 55 })
   property var profile: ({ keys: [], dials: [], pedals: [] })
   property string error: ""
-  readonly property bool connected: status.plus !== null || status.pedal !== null
+  readonly property bool connected: status.plus !== null || status.deck !== null || status.pedal !== null
   readonly property bool hasPlus: status.plus !== null
+  // Either a Stream Deck + or a key-only panel (MK.2, XL, Original V2) drives the key grid.
+  readonly property var deck: status.plus !== null ? status.plus : status.deck
+  readonly property bool hasDeck: deck !== null && deck !== undefined
+  readonly property bool hasDials: (profile.dials || []).length > 0 && hasPlus
+  readonly property int deckColumns: hasDeck && deck.columns ? deck.columns : 4
+  readonly property int deckKeys: hasDeck && deck.keys ? deck.keys : (profile.keys || []).length
   readonly property bool hasPedal: status.pedal !== null
   readonly property bool hasWave: status.wave !== null && status.wave !== undefined
   readonly property bool hasLights: (status.lights || []).some(function(x) { return x.reachable })
@@ -31,7 +37,7 @@ Panel {
   readonly property color controlFaceRaised: "#111111"
   readonly property color controlBorder: Qt.rgba(1, 1, 1, 0.22)
   readonly property var deviceOptions: [
-    hasPlus ? { value: "streamdeck", label: "Stream Deck +" } : null,
+    hasDeck ? { value: "streamdeck", label: deck.label || "Stream Deck" } : null,
     hasPedal ? { value: "pedal", label: "Pedal" } : null,
     hasWave ? { value: "wave", label: "Wave:3" } : null,
     hasLights ? { value: "lights", label: "Key Lights" } : null
@@ -192,13 +198,13 @@ Panel {
 
             Column {
               visible: root.selectedDevice === "streamdeck"; anchors.centerIn: parent; width: parent.width - Style.space(28); spacing: Style.space(10)
-              Text { anchors.horizontalCenter: parent.horizontalCenter; text: "STREAM DECK +"; color: Color.muted; font.family: Style.font.family; font.pixelSize: 10; font.bold: true }
+              Text { anchors.horizontalCenter: parent.horizontalCenter; text: (root.hasDeck && root.deck.label ? root.deck.label : "Stream Deck").toUpperCase(); color: Color.muted; font.family: Style.font.family; font.pixelSize: 10; font.bold: true }
               Grid {
-                width: parent.width; columns: 4; columnSpacing: Style.space(8); rowSpacing: Style.space(8)
+                width: parent.width; columns: root.deckColumns; columnSpacing: Style.space(8); rowSpacing: Style.space(8)
                 Repeater {
-                  model: root.profile.keys || []
+                  model: (root.profile.keys || []).slice(0, root.deckKeys)
                   Rectangle {
-                    width: (parent.width - Style.space(24)) / 4; height: width; radius: 0
+                    width: (parent.width - Style.space(8) * (root.deckColumns - 1)) / root.deckColumns; height: width; radius: 0
                     color: root.selectedControl === "key" && root.selectedIndex === index ? root.controlFaceRaised : root.controlFace
                     border.width: root.selectedControl === "key" && root.selectedIndex === index ? 2 : 1
                     border.color: root.selectedControl === "key" && root.selectedIndex === index ? Color.accent : root.controlBorder
@@ -212,6 +218,7 @@ Panel {
                 }
               }
               Column {
+                visible: root.hasDials
                 width: parent.width; spacing: Style.space(2)
                 Rectangle {
                   width: parent.width; height: Style.space(42); radius: 0; color: Qt.rgba(0, 0, 0, .5); border.color: Qt.rgba(1, 1, 1, .15)
@@ -318,7 +325,7 @@ Panel {
               onChanged: function(action) { root.saveAction("action", action) }
             }
             Column {
-              visible: root.selectedDevice === "streamdeck" && root.selectedControl === "dial"; width: parent.width; spacing: Style.space(10)
+              visible: root.selectedDevice === "streamdeck" && root.selectedControl === "dial" && root.hasDials; width: parent.width; spacing: Style.space(10)
               Repeater { model: [{slot:"left",label:"Turn left"},{slot:"press",label:"Press"},{slot:"right",label:"Turn right"}]
                 SearchableDropdown { required property var modelData; width: parent.width; label: modelData.label; options: root.actionOptions; value: (root.profile.dials[root.selectedIndex] || {})[modelData.slot] || ""; onChanged: function(action) { root.saveAction(modelData.slot, action) } }
               }
