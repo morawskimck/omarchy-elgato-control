@@ -8,32 +8,25 @@ MK2, MK2_SCISSOR, MK2_MODULE, ORIGINAL_V2 = 0x0080, 0x00A5, 0x00B9, 0x006D
 XL, XL_V2 = 0x006C, 0x008F
 # keys/columns/keySize/flip describe the key grid; flip marks panels whose
 # firmware expects key artwork rotated 180 degrees (gen-2 non-Plus hardware).
+def key_panel(label, keys, columns, key_size):
+    """A key-only panel: no dials, no LCD, and artwork the firmware wants rotated."""
+    return {"kind": "streamdeck", "label": label, "slot": "deck",
+            "capabilities": ["keys", "brightness"],
+            "keys": keys, "columns": columns, "keySize": key_size, "flip": True}
+
 DEVICE_SPECS = {
     PLUS: {"kind": "streamdeck", "label": "Stream Deck +", "slot": "plus",
            "capabilities": ["keys", "dials", "dialPress", "lcd", "touch", "brightness"],
            "keys": 8, "columns": 4, "keySize": 120, "flip": False},
-    MK2: {"kind": "streamdeck", "label": "Stream Deck MK.2", "slot": "deck",
-          "capabilities": ["keys", "brightness"],
-          "keys": 15, "columns": 5, "keySize": 72, "flip": True},
-    MK2_SCISSOR: {"kind": "streamdeck", "label": "Stream Deck MK.2 Scissor", "slot": "deck",
-                  "capabilities": ["keys", "brightness"],
-                  "keys": 15, "columns": 5, "keySize": 72, "flip": True},
-    MK2_MODULE: {"kind": "streamdeck", "label": "Stream Deck MK.2 Module", "slot": "deck",
-                 "capabilities": ["keys", "brightness"],
-                 "keys": 15, "columns": 5, "keySize": 72, "flip": True},
-    ORIGINAL_V2: {"kind": "streamdeck", "label": "Stream Deck", "slot": "deck",
-                  "capabilities": ["keys", "brightness"],
-                  "keys": 15, "columns": 5, "keySize": 72, "flip": True},
-    XL: {"kind": "streamdeck", "label": "Stream Deck XL", "slot": "deck",
-         "capabilities": ["keys", "brightness"],
-         "keys": 32, "columns": 8, "keySize": 96, "flip": True},
-    XL_V2: {"kind": "streamdeck", "label": "Stream Deck XL", "slot": "deck",
-            "capabilities": ["keys", "brightness"],
-            "keys": 32, "columns": 8, "keySize": 96, "flip": True},
+    MK2: key_panel("Stream Deck MK.2", 15, 5, 72),
+    MK2_SCISSOR: key_panel("Stream Deck MK.2 Scissor", 15, 5, 72),
+    MK2_MODULE: key_panel("Stream Deck MK.2 Module", 15, 5, 72),
+    ORIGINAL_V2: key_panel("Stream Deck", 15, 5, 72),
+    XL: key_panel("Stream Deck XL", 32, 8, 96),
+    XL_V2: key_panel("Stream Deck XL", 32, 8, 96),
     PEDAL: {"kind": "pedal", "label": "Stream Deck Pedal", "slot": "pedal",
             "capabilities": ["pedals"]},
 }
-DECK_PIDS = tuple(pid for pid, spec in DEVICE_SPECS.items() if spec["kind"] == "streamdeck")
 
 def device_spec(product_id):
     return DEVICE_SPECS.get(product_id, {})
@@ -339,30 +332,34 @@ def run_magick(command):
     except (OSError, subprocess.SubprocessError): return False
     return True
 
+def cached_render(parts, build):
+    """Return the cached artwork keyed by `parts`, rendering it on a miss.
+
+    `build` receives the output path and returns the ImageMagick argv.
+    """
+    digest = hashlib.sha256(json.dumps(parts).encode()).hexdigest()[:20]
+    KEY_CACHE.mkdir(parents=True, exist_ok=True)
+    output = KEY_CACHE / (digest + ".jpg")
+    if output.is_file(): return output
+    return output if run_magick(build(output)) else None
+
 def rendered_key_image(action, label, color, size=120, flip=False):
     """Render key artwork at the panel's native size, rotated when the firmware expects it."""
     existing = ICONS / (action + ".jpg")
     converter = shutil.which("magick") or shutil.which("convert")
     if existing.is_file():
+        # Bundled artwork is authored at the Plus's size and orientation.
         if size == 120 and not flip: return existing
         if not converter: return None
-        digest = hashlib.sha256(json.dumps(
-            ["artwork-v2-truecolor", action, str(existing.stat().st_mtime_ns), size, flip]).encode()).hexdigest()[:20]
-        KEY_CACHE.mkdir(parents=True, exist_ok=True)
-        output = KEY_CACHE / (digest + ".jpg")
-        if output.is_file(): return output
-        command = [converter, str(existing), "-resize", "%dx%d!" % (size, size)]
-        if flip: command += ["-rotate", "180"]
-        command += JPEG_OUTPUT + ["-quality", "92", str(output)]
-        return output if run_magick(command) else None
+        def resize(output):
+            command = [converter, str(existing), "-resize", "%dx%d!" % (size, size)]
+            if flip: command += ["-rotate", "180"]
+            return command + JPEG_OUTPUT + ["-quality", "92", str(output)]
+        return cached_render(
+            ["artwork-v2-truecolor", action, str(existing.stat().st_mtime_ns), size, flip], resize)
     if not converter: return None
     source = action_icon(action)
     source_stamp = str(pathlib.Path(source).stat().st_mtime_ns) if source and pathlib.Path(source).is_file() else "none"
-    digest = hashlib.sha256(json.dumps(
-        ["renderer-v5-truecolor", action, label, source, source_stamp, size, flip]).encode()).hexdigest()[:20]
-    KEY_CACHE.mkdir(parents=True, exist_ok=True)
-    output = KEY_CACHE / (digest + ".jpg")
-    if output.is_file(): return output
     scale = size / 120.0
     def scaled(value, floor=1): return max(floor, int(round(value * scale)))
     safe_label = str(label or action_label(action))[:16]
@@ -380,8 +377,9 @@ def rendered_key_image(action, label, color, size=120, flip=False):
     command += ["-fill", "white", "-pointsize", str(max(9, scaled(11))), "-gravity", "south",
                 "-annotate", "+0+%d" % scaled(9), safe_label]
     if flip: command += ["-rotate", "180"]
-    command += JPEG_OUTPUT + ["-quality", "92", str(output)]
-    return output if run_magick(command) else None
+    return cached_render(
+        ["renderer-v5-truecolor", action, label, source, source_stamp, size, flip],
+        lambda output: command + JPEG_OUTPUT + ["-quality", "92", str(output)])
 
 def ensure_key_slots(profile, count):
     """Grow the profile so every physical key on the attached panel is editable."""
@@ -578,10 +576,12 @@ class Daemon:
             self.hid.write(dev, header + list(payload) + [0] * (1016 - len(payload)))
             page += 1
 
-    def decorate(self, device):
+    def decorate(self, device, reset=False):
         dev, spec = device["handle"], device_spec(device["productId"])
         capabilities = spec.get("capabilities", [])
-        if "lcd" not in capabilities: self.hid.feature(dev, [0x03, 0x02])
+        # Clear the panel once on connect so keys past the profile's length do
+        # not keep artwork from a previous session; a redraw does not need it.
+        if reset and "lcd" not in capabilities: self.hid.feature(dev, [0x03, 0x02])
         self.hid.feature(dev, [0x03, 0x08, max(0, min(100, self.brightness))])
         for i, key in enumerate(self.profile.get("keys", [])[:spec.get("keys", 8)]):
             if "touch" in capabilities:
@@ -631,8 +631,9 @@ class Daemon:
                     device = dict(info, handle=handle)
                     self.devices[info["path"]] = device
                     if info["kind"] == "streamdeck":
-                        if self.grow_profile(info.get("keys", 0)): self.profile = load_profile()
-                        self.decorate(device)
+                        grown = self.grow_profile(info.get("keys", 0))
+                        if grown: self.profile = grown
+                        self.decorate(device, reset=True)
         for slot in ("plus", "deck", "pedal"):
             value = next((d for d in self.devices.values()
                           if device_spec(d["productId"]).get("slot") == slot), None)
@@ -648,13 +649,16 @@ class Daemon:
         self.status["devices"] = devices
 
     def grow_profile(self, count):
-        """Persist extra key slots when a panel with more keys than the profile appears."""
-        if not count: return False
+        """Add key slots for a panel with more keys than the profile has.
+
+        Returns the grown profile, or None when nothing needed adding.
+        """
+        if not count: return None
         profile = load_profile()
-        if not ensure_key_slots(profile, count): return False
+        if not ensure_key_slots(profile, count): return None
         save_profile(profile)
         self.mtime = PROFILE.stat().st_mtime
-        return True
+        return profile
 
     def act(self, action):
         if not action: return
