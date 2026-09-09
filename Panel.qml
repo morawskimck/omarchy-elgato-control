@@ -87,7 +87,15 @@ Panel {
     lightProc.running = true
   }
 
-  function open() { root.controller.show(); refresh() }
+  // The catalog enumerates installed .desktop files, so it goes stale as soon
+  // as an application is added or removed. refresh() runs on a timer and must
+  // not rescan that often, so rebuild it once per open instead of only when
+  // it has never been loaded.
+  function open() {
+    root.controller.show()
+    if (!catalogProc.running) catalogProc.running = true
+    refresh()
+  }
   function close() { root.controller.hide() }
   function toggle() { if (root.opened) close(); else open() }
   function refresh() {
