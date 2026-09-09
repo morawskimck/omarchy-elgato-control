@@ -289,24 +289,53 @@ def desktop_entry(desktop_id):
         return values
     return {}
 
+ICON_INDEX = None
+ICON_INDEX_KEY = None
+ICON_INDEX_AT = 0.0
+ICON_INDEX_TTL = 30.0
+
+def icon_index():
+    """Map an icon filename to [(root rank, path)], walking each tree once.
+
+    The index is rebuilt when the roots change or the entry goes stale, so a
+    long-lived daemon still sees icons installed after it started.
+    """
+    global ICON_INDEX, ICON_INDEX_KEY, ICON_INDEX_AT
+    roots = (pathlib.Path.home() / ".local/share/icons",
+             pathlib.Path("/usr/share/icons/hicolor"),
+             pathlib.Path("/usr/share/pixmaps"))
+    key = tuple(str(root) for root in roots)
+    now = time.monotonic()
+    if ICON_INDEX is None or ICON_INDEX_KEY != key or now - ICON_INDEX_AT > ICON_INDEX_TTL:
+        index = {}
+        for rank, root in enumerate(roots):
+            if not root.is_dir(): continue
+            for directory, _subdirectories, files in os.walk(root):
+                base = pathlib.Path(directory)
+                for name in files:
+                    index.setdefault(name, []).append((rank, base / name))
+        ICON_INDEX, ICON_INDEX_KEY, ICON_INDEX_AT = index, key, now
+    return ICON_INDEX
+
 def resolve_icon(icon):
     if not icon: return ""
     direct = pathlib.Path(icon)
     if direct.is_file(): return str(direct)
     names = [icon] if pathlib.Path(icon).suffix.lower() in (".svg", ".png", ".xpm", ".jpg", ".jpeg") else [icon + extension for extension in (".svg", ".png", ".xpm")]
-    roots = [pathlib.Path.home() / ".local/share/icons", pathlib.Path("/usr/share/icons/hicolor"), pathlib.Path("/usr/share/pixmaps")]
-    candidates = []
-    for root in roots:
-        if not root.is_dir(): continue
-        for name in names:
-            candidates.extend(root.glob("**/" + name))
+    index = icon_index()
+    # (root rank, name rank) preserves the original roots-then-names ordering,
+    # which decides ties once the size score has been applied.
+    candidates = [(rank, order, path)
+                  for order, name in enumerate(names) for rank, path in index.get(name, [])]
     if not candidates: return ""
-    def score(path):
-        text = str(path)
+    def score(entry):
+        text = str(entry[2])
         for rank, token in enumerate(("256x256", "128x128", "scalable", "512x512", "64x64", "48x48")):
             if token in text: return rank
         return 20
-    return str(sorted(candidates, key=score)[0])
+    # Path breaks remaining ties so the choice does not depend on walk order.
+    return str(sorted(candidates,
+                      key=lambda entry: (score(entry), entry[0], entry[1], str(entry[2])))[0][2])
 
 def action_icon(action):
     built_in = ICONS / (action + ".jpg")
@@ -362,7 +391,7 @@ def rendered_key_image(action, label, color, size=120, flip=False):
     source_stamp = str(pathlib.Path(source).stat().st_mtime_ns) if source and pathlib.Path(source).is_file() else "none"
     scale = size / 120.0
     def scaled(value, floor=1): return max(floor, int(round(value * scale)))
-    safe_label = str(label or action_label(action))[:16]
+    safe_label = str(label or action_label(action))[:max(8, scaled(16))]
     command = [converter, "-size", "%dx%d" % (size, size), "xc:#000000",
                "-font", "/usr/share/fonts/noto/NotoSans-Regular.ttf"]
     if source:
@@ -378,7 +407,7 @@ def rendered_key_image(action, label, color, size=120, flip=False):
                 "-annotate", "+0+%d" % scaled(9), safe_label]
     if flip: command += ["-rotate", "180"]
     return cached_render(
-        ["renderer-v5-truecolor", action, label, source, source_stamp, size, flip],
+        ["renderer-v6-truecolor", action, label, source, source_stamp, size, flip],
         lambda output: command + JPEG_OUTPUT + ["-quality", "92", str(output)])
 
 def ensure_key_slots(profile, count):
@@ -624,6 +653,7 @@ class Daemon:
         for path in list(self.devices):
             if path not in live:
                 self.hid.lib.hid_close(self.devices.pop(path)["handle"])
+                self.previous.pop("keys:" + path, None)
         for info in found:
             if info["path"] not in self.devices:
                 handle = self.hid.open(info["path"])
@@ -631,8 +661,11 @@ class Daemon:
                     device = dict(info, handle=handle)
                     self.devices[info["path"]] = device
                     if info["kind"] == "streamdeck":
-                        grown = self.grow_profile(info.get("keys", 0))
-                        if grown: self.profile = grown
+                        try:
+                            grown = self.grow_profile(info.get("keys", 0))
+                            if grown: self.profile = grown
+                        except (OSError, ValueError, json.JSONDecodeError) as e:
+                            self.status["error"] = "Profile: " + str(e)
                         self.decorate(device, reset=True)
         for slot in ("plus", "deck", "pedal"):
             value = next((d for d in self.devices.values()
@@ -728,8 +761,9 @@ class Daemon:
         cache = "keys:" + device["path"]
         if len(data) < 5 or data[0] != 1: return
         if data[1] == 0:
-            states = list(data[4:4 + count]); old = self.previous.get(cache, [0] * count)
+            states = list(data[4:4 + count]); old = list(self.previous.get(cache, []))
             if len(states) < count: states += [0] * (count - len(states))
+            if len(old) < count: old += [0] * (count - len(old))
             for i, state in enumerate(states):
                 if state and not old[i] and i < len(self.profile.get("keys", [])): self.act(self.profile["keys"][i].get("action"))
             self.previous[cache] = states

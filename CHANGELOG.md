@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Add support for key-only Stream Deck panels: MK.2 (including Scissor and Module revisions), Original V2, and XL/XL V2. Key count, grid, artwork size, and the 180-degree artwork rotation the non-Plus gen-2 firmware expects are now per-device, and the profile grows to the attached panel's key count.
+- Render key artwork as 3-component sRGB JPEG. ImageMagick emitted a 1-channel grayscale file for monochrome keys, which the panel firmware silently fails to decode: it repainted the last image it decoded, so an unassigned key showed a neighbour's artwork.
+- Size the panel editor's key grid from the connected device, hide the dial row on panels without dials, and let the device stage grow past two rows.
+- Rebuild the action catalog when the panel opens, so an application installed after the shell started is no longer invisible to the editor until a restart.
+- Index the icon themes once per lookup batch instead of globbing them per application, cutting a catalog build on a typical system from ~0.6s to ~0.06s.
+- Drop stale per-device key state when a device disconnects, so swapping panels on the same hidraw node cannot crash the daemon.
+- Report profile read and write failures during device connect through `status.error` instead of terminating the daemon.
+
 ## 0.3.1 — 2026-08-20
 
 - Force `Text.PlainText` for Key Light names and other externally supplied panel strings so QML AutoText cannot load markup or remote resources.

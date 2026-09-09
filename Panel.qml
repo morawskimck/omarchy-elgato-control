@@ -16,15 +16,15 @@ Panel {
   property var status: ({ running: false, plus: null, deck: null, pedal: null, profile: "Omarchy Default", brightness: 55 })
   property var profile: ({ keys: [], dials: [], pedals: [] })
   property string error: ""
-  readonly property bool connected: status.plus !== null || status.deck !== null || status.pedal !== null
-  readonly property bool hasPlus: status.plus !== null
+  readonly property bool connected: status.plus != null || status.deck != null || status.pedal != null
+  readonly property bool hasPlus: status.plus != null
   // Either a Stream Deck + or a key-only panel (MK.2, XL, Original V2) drives the key grid.
-  readonly property var deck: status.plus !== null ? status.plus : status.deck
-  readonly property bool hasDeck: deck !== null && deck !== undefined
+  readonly property var deck: status.plus != null ? status.plus : status.deck
+  readonly property bool hasDeck: deck != null
   readonly property bool hasDials: (profile.dials || []).length > 0 && hasPlus
   readonly property int deckColumns: hasDeck && deck.columns ? deck.columns : 4
   readonly property int deckKeys: hasDeck && deck.keys ? deck.keys : (profile.keys || []).length
-  readonly property bool hasPedal: status.pedal !== null
+  readonly property bool hasPedal: status.pedal != null
   readonly property bool hasWave: status.wave !== null && status.wave !== undefined
   readonly property bool hasLights: (status.lights || []).some(function(x) { return x.reachable })
   readonly property string helper: Qt.resolvedUrl("bin/elgato-control").toString().replace("file://", "")
@@ -211,17 +211,20 @@ Panel {
               visible: root.selectedDevice === "streamdeck"; anchors.centerIn: parent; width: parent.width - Style.space(28); spacing: Style.space(10)
               Text { anchors.horizontalCenter: parent.horizontalCenter; text: (root.hasDeck && root.deck.label ? root.deck.label : "Stream Deck").toUpperCase(); color: Color.muted; font.family: Style.font.family; font.pixelSize: 10; font.bold: true }
               Grid {
+                id: keyGrid
                 width: parent.width; columns: root.deckColumns; columnSpacing: Style.space(8); rowSpacing: Style.space(8)
+                readonly property real cell: (width - Style.space(8) * (root.deckColumns - 1)) / root.deckColumns
                 Repeater {
                   model: (root.profile.keys || []).slice(0, root.deckKeys)
                   Rectangle {
-                    width: (parent.width - Style.space(8) * (root.deckColumns - 1)) / root.deckColumns; height: width; radius: 0
+                    width: keyGrid.cell; height: width; radius: 0
+                    clip: true
                     color: root.selectedControl === "key" && root.selectedIndex === index ? root.controlFaceRaised : root.controlFace
                     border.width: root.selectedControl === "key" && root.selectedIndex === index ? 2 : 1
                     border.color: root.selectedControl === "key" && root.selectedIndex === index ? Color.accent : root.controlBorder
                     Column { anchors.centerIn: parent; width: parent.width - Style.space(10); spacing: Style.space(3)
                       Text { anchors.horizontalCenter: parent.horizontalCenter; text: index + 1; color: Color.muted; font.family: Style.font.family; font.pixelSize: 9 }
-                      Image { anchors.horizontalCenter: parent.horizontalCenter; width: Style.space(30); height: width; source: root.actionIcon(modelData.action); visible: source.toString() !== ""; fillMode: Image.PreserveAspectFit; smooth: true }
+                      Image { anchors.horizontalCenter: parent.horizontalCenter; width: Math.min(Style.space(30), keyGrid.cell * 0.42); height: width; source: root.actionIcon(modelData.action); visible: source.toString() !== ""; fillMode: Image.PreserveAspectFit; smooth: true }
                       Text { width: parent.width; horizontalAlignment: Text.AlignHCenter; elide: Text.ElideRight; text: root.actionName(modelData.action); textFormat: Text.PlainText; color: Color.foreground; font.family: Style.font.family; font.pixelSize: 9 }
                     }
                     MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.selectControl("key", index) }
