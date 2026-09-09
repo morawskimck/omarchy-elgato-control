@@ -4,10 +4,18 @@ import argparse, ctypes, hashlib, ipaddress, json, os, pathlib, re, shutil, sign
 
 VID = 0x0FD9
 PLUS, PEDAL = 0x0084, 0x0086
+# keys/columns/keySize/flip describe the key grid; flip marks panels whose
+# firmware expects key artwork rotated 180 degrees (gen-2 non-Plus hardware).
 DEVICE_SPECS = {
-    PLUS: {"kind": "streamdeck", "capabilities": ["keys", "dials", "dialPress", "lcd", "touch", "brightness"]},
-    PEDAL: {"kind": "pedal", "capabilities": ["pedals"]},
+    PLUS: {"kind": "streamdeck", "label": "Stream Deck +", "slot": "plus",
+           "capabilities": ["keys", "dials", "dialPress", "lcd", "touch", "brightness"],
+           "keys": 8, "columns": 4, "keySize": 120, "flip": False},
+    PEDAL: {"kind": "pedal", "label": "Stream Deck Pedal", "slot": "pedal",
+            "capabilities": ["pedals"]},
 }
+
+def device_spec(product_id):
+    return DEVICE_SPECS.get(product_id, {})
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 CONFIG = pathlib.Path(os.environ.get("XDG_CONFIG_HOME", pathlib.Path.home() / ".config")) / "elgato-control"
 STATE = pathlib.Path(os.environ.get("XDG_STATE_HOME", pathlib.Path.home() / ".local/state")) / "elgato-control"
@@ -77,6 +85,9 @@ class Hid:
                 out.append({"path": i.path.decode(), "productId": i.product_id,
                             "serial": i.serial_number or "", "product": i.product_string or "Elgato",
                             "kind": DEVICE_SPECS[i.product_id]["kind"],
+                            "label": DEVICE_SPECS[i.product_id].get("label", "Elgato"),
+                            "keys": DEVICE_SPECS[i.product_id].get("keys", 0),
+                            "columns": DEVICE_SPECS[i.product_id].get("columns", 0),
                             "capabilities": DEVICE_SPECS[i.product_id]["capabilities"]})
             cur = i.next
         if head: self.lib.hid_free_enumeration(head)
@@ -298,30 +309,71 @@ def action_catalog():
                    for desktop_id, name in desktop_applications())
     return options
 
-def rendered_key_image(action, label, color):
-    existing = ICONS / (action + ".jpg")
-    if existing.is_file(): return existing
-    converter = shutil.which("magick") or shutil.which("convert")
-    if not converter: return None
-    source = action_icon(action)
-    source_stamp = str(pathlib.Path(source).stat().st_mtime_ns) if source and pathlib.Path(source).is_file() else "none"
-    digest = hashlib.sha256(json.dumps(["renderer-v3-black", action, label, source, source_stamp]).encode()).hexdigest()[:20]
+# Panel firmware decodes 3-component baseline JPEG only; ImageMagick would
+# otherwise emit a 1-channel grayscale file for monochrome artwork.
+JPEG_OUTPUT = ["-colorspace", "sRGB", "-type", "TrueColor", "-interlace", "none"]
+
+def run_magick(command):
+    try: subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=8)
+    except (OSError, subprocess.SubprocessError): return False
+    return True
+
+def cached_render(parts, build):
+    """Return the cached artwork keyed by `parts`, rendering it on a miss.
+
+    `build` receives the output path and returns the ImageMagick argv.
+    """
+    digest = hashlib.sha256(json.dumps(parts).encode()).hexdigest()[:20]
     KEY_CACHE.mkdir(parents=True, exist_ok=True)
     output = KEY_CACHE / (digest + ".jpg")
     if output.is_file(): return output
-    safe_label = str(label or action_label(action))[:16]
-    command = [converter, "-size", "120x120", "xc:#000000",
+    return output if run_magick(build(output)) else None
+
+def rendered_key_image(action, label, color, size=120, flip=False):
+    """Render key artwork at the panel's native size, rotated when the firmware expects it."""
+    existing = ICONS / (action + ".jpg")
+    converter = shutil.which("magick") or shutil.which("convert")
+    if existing.is_file():
+        # Bundled artwork is authored at the Plus's size and orientation.
+        if size == 120 and not flip: return existing
+        if not converter: return None
+        def resize(output):
+            command = [converter, str(existing), "-resize", "%dx%d!" % (size, size)]
+            if flip: command += ["-rotate", "180"]
+            return command + JPEG_OUTPUT + ["-quality", "92", str(output)]
+        return cached_render(
+            ["artwork-v2-truecolor", action, str(existing.stat().st_mtime_ns), size, flip], resize)
+    if not converter: return None
+    source = action_icon(action)
+    source_stamp = str(pathlib.Path(source).stat().st_mtime_ns) if source and pathlib.Path(source).is_file() else "none"
+    scale = size / 120.0
+    def scaled(value, floor=1): return max(floor, int(round(value * scale)))
+    safe_label = str(label or action_label(action))[:max(8, scaled(16))]
+    command = [converter, "-size", "%dx%d" % (size, size), "xc:#000000",
                "-font", "/usr/share/fonts/noto/NotoSans-Regular.ttf"]
     if source:
-        command += ["(", source, "-resize", "68x68", ")", "-gravity", "center", "-geometry", "+0-8", "-composite"]
+        command += ["(", source, "-resize", "%dx%d" % (scaled(68), scaled(68)), ")",
+                    "-gravity", "center", "-geometry", "+0-%d" % scaled(8), "-composite"]
     else:
-        initials = "".join(word[0] for word in safe_label.split()[:2]).upper() or "?"
-        command += ["-fill", "white", "-pointsize", "34", "-gravity", "center", "-annotate", "+0-8", initials]
-    command += ["-fill", "white", "-pointsize", "11", "-gravity", "south", "-annotate", "+0+9", safe_label,
-                "-quality", "92", str(output)]
-    try: subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=8)
-    except (OSError, subprocess.SubprocessError): return None
-    return output
+        trimmed = safe_label.strip()
+        initials = (trimmed if 0 < len(trimmed) <= 3
+                    else "".join(word[0] for word in trimmed.split()[:2]).upper() or "?")
+        command += ["-fill", "white", "-pointsize", str(scaled(34)), "-gravity", "center",
+                    "-annotate", "+0-%d" % scaled(8), initials]
+    command += ["-fill", "white", "-pointsize", str(max(9, scaled(11))), "-gravity", "south",
+                "-annotate", "+0+%d" % scaled(9), safe_label]
+    if flip: command += ["-rotate", "180"]
+    return cached_render(
+        ["renderer-v6-truecolor", action, label, source, source_stamp, size, flip],
+        lambda output: command + JPEG_OUTPUT + ["-quality", "92", str(output)])
+
+def ensure_key_slots(profile, count):
+    """Grow the profile so every physical key on the attached panel is editable."""
+    keys = profile.setdefault("keys", [])
+    if len(keys) >= count: return False
+    for index in range(len(keys), count):
+        keys.append({"label": str(index + 1), "action": "", "color": [40, 90, 130]})
+    return True
 
 def desktop_file_exists(desktop_id):
     if not re.fullmatch(r"[A-Za-z0-9_.+-]+", desktop_id): return False
@@ -494,13 +546,14 @@ class Daemon:
         self.last_light_discovery = 0
         self.lcd_signature = None
         self.running = True
-        self.status = {"running": True, "profile": self.profile.get("name", "Default"), "plus": None, "pedal": None,
+        self.status = {"running": True, "profile": self.profile.get("name", "Default"), "plus": None, "deck": None, "pedal": None,
                        "wave": None, "lights": [], "devices": [], "recentReports": {},
                        "lastAction": "", "lastEvent": "", "error": "", "updatedAt": int(time.time())}
 
-    def key_image(self, dev, index, key):
+    def key_image(self, dev, index, key, spec):
         action = key.get("action", "")
-        path = rendered_key_image(action, key.get("label", action_label(action)), key.get("color", [42, 54, 72]))
+        path = rendered_key_image(action, key.get("label", action_label(action)), key.get("color", [42, 54, 72]),
+                                  size=spec.get("keySize", 120), flip=spec.get("flip", False))
         if not path or not path.exists(): return
         data = path.read_bytes(); page = 0
         for offset in range(0, len(data), 1016):
@@ -509,13 +562,19 @@ class Daemon:
             self.hid.write(dev, header + list(payload) + [0] * (1016 - len(payload)))
             page += 1
 
-    def decorate(self, dev):
+    def decorate(self, device, reset=False):
+        dev, spec = device["handle"], device_spec(device["productId"])
+        capabilities = spec.get("capabilities", [])
+        # Clear the panel once on connect so keys past the profile's length do
+        # not keep artwork from a previous session; a redraw does not need it.
+        if reset and "lcd" not in capabilities: self.hid.feature(dev, [0x03, 0x02])
         self.hid.feature(dev, [0x03, 0x08, max(0, min(100, self.brightness))])
-        for i, key in enumerate(self.profile.get("keys", [])[:8]):
-            color = key.get("color", [40, 90, 130])
-            self.hid.feature(dev, [0x03, 0x06, i] + [int(x) & 255 for x in color[:3]])
-            self.key_image(dev, i, key)
-        self.update_lcd(dev, force=True)
+        for i, key in enumerate(self.profile.get("keys", [])[:spec.get("keys", 8)]):
+            if "touch" in capabilities:
+                color = key.get("color", [40, 90, 130])
+                self.hid.feature(dev, [0x03, 0x06, i] + [int(x) & 255 for x in color[:3]])
+            self.key_image(dev, i, key, spec)
+        if "lcd" in capabilities: self.update_lcd(dev, force=True)
 
     def update_lcd(self, dev, force=False):
         signature = json.dumps({"dials": self.profile.get("dials", []), "lights": self.light_states,
@@ -551,22 +610,45 @@ class Daemon:
         for path in list(self.devices):
             if path not in live:
                 self.hid.lib.hid_close(self.devices.pop(path)["handle"])
+                self.previous.pop("keys:" + path, None)
         for info in found:
             if info["path"] not in self.devices:
                 handle = self.hid.open(info["path"])
                 if handle:
-                    self.devices[info["path"]] = dict(info, handle=handle)
-                    if info["productId"] == PLUS: self.decorate(handle)
-        for pid, key in ((PLUS, "plus"), (PEDAL, "pedal")):
-            value = next((d for d in self.devices.values() if d["productId"] == pid), None)
-            self.status[key] = ({k: value[k] for k in ("product", "serial", "path", "kind", "capabilities")} if value else None)
+                    device = dict(info, handle=handle)
+                    self.devices[info["path"]] = device
+                    if info["kind"] == "streamdeck":
+                        try:
+                            grown = self.grow_profile(info.get("keys", 0))
+                            if grown: self.profile = grown
+                        except (OSError, ValueError, json.JSONDecodeError) as e:
+                            self.status["error"] = "Profile: " + str(e)
+                        self.decorate(device, reset=True)
+        for slot in ("plus", "deck", "pedal"):
+            value = next((d for d in self.devices.values()
+                          if device_spec(d["productId"]).get("slot") == slot), None)
+            self.status[slot] = ({k: value[k] for k in
+                                  ("product", "serial", "path", "kind", "label", "keys", "columns", "capabilities")}
+                                 if value else None)
         self.status["wave"] = detect_wave()
-        devices = [self.status[x] for x in ("plus", "pedal", "wave") if self.status.get(x)]
+        devices = [self.status[x] for x in ("plus", "deck", "pedal", "wave") if self.status.get(x)]
         if self.status.get("lights"):
             devices.append({"product": "Elgato Key Lights", "kind": "lights", "connected": True,
                             "capabilities": ["lights", "power", "brightness", "temperature"],
                             "count": len([x for x in self.status["lights"] if x.get("reachable")])})
         self.status["devices"] = devices
+
+    def grow_profile(self, count):
+        """Add key slots for a panel with more keys than the profile has.
+
+        Returns the grown profile, or None when nothing needed adding.
+        """
+        if not count: return None
+        profile = load_profile()
+        if not ensure_key_slots(profile, count): return None
+        save_profile(profile)
+        self.mtime = PROFILE.stat().st_mtime
+        return profile
 
     def act(self, action):
         if not action: return
@@ -581,8 +663,9 @@ class Daemon:
         elif action.startswith("brightness_"):
             self.brightness = 55 if action == "brightness_reset" else max(0, min(100, self.brightness + (5 if action == "brightness_up" else -5)))
             for d in self.devices.values():
-                if d["productId"] == PLUS:
-                    self.hid.feature(d["handle"], [0x03, 0x08, self.brightness]); self.update_lcd(d["handle"])
+                if d["kind"] != "streamdeck": continue
+                self.hid.feature(d["handle"], [0x03, 0x08, self.brightness])
+                if "lcd" in device_spec(d["productId"]).get("capabilities", []): self.update_lcd(d["handle"])
         else:
             cmd = command_for(action, self.status.get("wave"))
             if cmd:
@@ -611,7 +694,7 @@ class Daemon:
             states.append(entry)
         self.light_states = states; self.status["lights"] = states
         for d in self.devices.values():
-            if d["productId"] == PLUS: self.update_lcd(d["handle"])
+            if "lcd" in device_spec(d["productId"]).get("capabilities", []): self.update_lcd(d["handle"])
 
     def act_lights(self, action):
         if not self.light_states: self.refresh_lights()
@@ -629,14 +712,19 @@ class Daemon:
             except Exception as e: self.status["error"] = "Light: " + str(e)
         self.refresh_lights()
 
-    def parse_plus(self, data):
+    def parse_deck(self, data, device):
+        spec = device_spec(device["productId"])
+        count = spec.get("keys", 8)
+        cache = "keys:" + device["path"]
         if len(data) < 5 or data[0] != 1: return
         if data[1] == 0:
-            states = list(data[4:12]); old = self.previous.get("plus_keys", [0] * 8)
+            states = list(data[4:4 + count]); old = list(self.previous.get(cache, []))
+            if len(states) < count: states += [0] * (count - len(states))
+            if len(old) < count: old += [0] * (count - len(old))
             for i, state in enumerate(states):
                 if state and not old[i] and i < len(self.profile.get("keys", [])): self.act(self.profile["keys"][i].get("action"))
-            self.previous["plus_keys"] = states
-        elif data[1] == 3 and len(data) >= 9:
+            self.previous[cache] = states
+        elif "dials" in spec.get("capabilities", []) and data[1] == 3 and len(data) >= 9:
             kind = data[4]
             if kind == 0:
                 states = list(data[5:9]); old = self.previous.get("dial_keys", [0] * 4)
@@ -675,13 +763,13 @@ class Daemon:
                     self.profile, self.mtime = load_profile(), mtime
                     self.lcd_signature = None
                     for device in self.devices.values():
-                        if device["productId"] == PLUS: self.decorate(device["handle"])
+                        if device["kind"] == "streamdeck": self.decorate(device)
             except (OSError, ValueError, json.JSONDecodeError) as e: self.status["error"] = "Profile: " + str(e)
             for d in list(self.devices.values()):
                 data = self.hid.read(d["handle"])
                 if data:
                     self.status["recentReports"][d["kind"]] = {"hex": data.hex(), "length": len(data), "at": int(time.time())}
-                    self.parse_plus(data) if d["productId"] == PLUS else self.parse_pedal(data)
+                    self.parse_deck(data, d) if d["kind"] == "streamdeck" else self.parse_pedal(data)
             if now - last_status > .5:
                 self.status.update(running=True, brightness=self.brightness, profile=self.profile.get("name", "Default"), updatedAt=int(time.time()))
                 write_status(self.status); last_status = now
@@ -729,7 +817,7 @@ def main():
         except (OSError, RuntimeError, ValueError, urllib.error.URLError) as error: p.error(str(error))
         print(json.dumps(result)); return
     if args.command == "status":
-        data = json.loads(STATUS.read_text()) if STATUS.exists() else {"running": False, "plus": None, "pedal": None, "profile": load_profile().get("name", "Default")}
+        data = json.loads(STATUS.read_text()) if STATUS.exists() else {"running": False, "plus": None, "deck": None, "pedal": None, "profile": load_profile().get("name", "Default")}
         print(json.dumps(data) if args.json else json.dumps(data, indent=2)); return
     daemon = Daemon()
     signal.signal(signal.SIGTERM, lambda *_: setattr(daemon, "running", False)); signal.signal(signal.SIGINT, lambda *_: setattr(daemon, "running", False))

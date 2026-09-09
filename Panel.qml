@@ -13,12 +13,18 @@ Panel {
   property var anchorItem: null
   property var hostWidget: null
   readonly property var barIdentity: hostWidget || root
-  property var status: ({ running: false, plus: null, pedal: null, profile: "Omarchy Default", brightness: 55 })
+  property var status: ({ running: false, plus: null, deck: null, pedal: null, profile: "Omarchy Default", brightness: 55 })
   property var profile: ({ keys: [], dials: [], pedals: [] })
   property string error: ""
-  readonly property bool connected: status.plus !== null || status.pedal !== null
-  readonly property bool hasPlus: status.plus !== null
-  readonly property bool hasPedal: status.pedal !== null
+  readonly property bool connected: status.plus != null || status.deck != null || status.pedal != null
+  readonly property bool hasPlus: status.plus != null
+  // Either a Stream Deck + or the panel in the deck slot drives the key grid.
+  readonly property var deck: status.plus != null ? status.plus : status.deck
+  readonly property bool hasDeck: deck != null
+  readonly property bool hasDials: (profile.dials || []).length > 0 && hasPlus
+  readonly property int deckColumns: hasDeck && deck.columns ? deck.columns : 4
+  readonly property int deckKeys: hasDeck && deck.keys ? deck.keys : (profile.keys || []).length
+  readonly property bool hasPedal: status.pedal != null
   readonly property bool hasWave: status.wave !== null && status.wave !== undefined
   readonly property bool hasLights: (status.lights || []).some(function(x) { return x.reachable })
   readonly property string helper: Qt.resolvedUrl("bin/elgato-control").toString().replace("file://", "")
@@ -31,7 +37,7 @@ Panel {
   readonly property color controlFaceRaised: "#111111"
   readonly property color controlBorder: Qt.rgba(1, 1, 1, 0.22)
   readonly property var deviceOptions: [
-    hasPlus ? { value: "streamdeck", label: "Stream Deck +" } : null,
+    hasDeck ? { value: "streamdeck", label: deck.label || "Stream Deck" } : null,
     hasPedal ? { value: "pedal", label: "Pedal" } : null,
     hasWave ? { value: "wave", label: "Wave:3" } : null,
     hasLights ? { value: "lights", label: "Key Lights" } : null
@@ -187,24 +193,30 @@ Panel {
           width: parent.width; spacing: Style.space(14)
 
           Rectangle {
-            width: parent.width * 0.61; height: Style.space(310); radius: 0
+            width: parent.width * 0.61; radius: 0
+            height: Math.max(Style.space(310), root.selectedDevice === "streamdeck"
+                             ? deckColumn.implicitHeight + Style.space(28) : 0)
             color: Qt.rgba(0, 0, 0, 0.28); border.color: Qt.rgba(1, 1, 1, 0.14)
 
             Column {
+              id: deckColumn
               visible: root.selectedDevice === "streamdeck"; anchors.centerIn: parent; width: parent.width - Style.space(28); spacing: Style.space(10)
-              Text { anchors.horizontalCenter: parent.horizontalCenter; text: "STREAM DECK +"; color: Color.muted; font.family: Style.font.family; font.pixelSize: 10; font.bold: true }
+              Text { anchors.horizontalCenter: parent.horizontalCenter; text: (root.hasDeck && root.deck.label ? root.deck.label : "Stream Deck").toUpperCase(); color: Color.muted; font.family: Style.font.family; font.pixelSize: 10; font.bold: true }
               Grid {
-                width: parent.width; columns: 4; columnSpacing: Style.space(8); rowSpacing: Style.space(8)
+                id: keyGrid
+                width: parent.width; columns: root.deckColumns; columnSpacing: Style.space(8); rowSpacing: Style.space(8)
+                readonly property real cell: (width - Style.space(8) * (root.deckColumns - 1)) / root.deckColumns
                 Repeater {
-                  model: root.profile.keys || []
+                  model: (root.profile.keys || []).slice(0, root.deckKeys)
                   Rectangle {
-                    width: (parent.width - Style.space(24)) / 4; height: width; radius: 0
+                    width: keyGrid.cell; height: width; radius: 0
+                    clip: true
                     color: root.selectedControl === "key" && root.selectedIndex === index ? root.controlFaceRaised : root.controlFace
                     border.width: root.selectedControl === "key" && root.selectedIndex === index ? 2 : 1
                     border.color: root.selectedControl === "key" && root.selectedIndex === index ? Color.accent : root.controlBorder
                     Column { anchors.centerIn: parent; width: parent.width - Style.space(10); spacing: Style.space(3)
                       Text { anchors.horizontalCenter: parent.horizontalCenter; text: index + 1; color: Color.muted; font.family: Style.font.family; font.pixelSize: 9 }
-                      Image { anchors.horizontalCenter: parent.horizontalCenter; width: Style.space(30); height: width; source: root.actionIcon(modelData.action); visible: source.toString() !== ""; fillMode: Image.PreserveAspectFit; smooth: true }
+                      Image { anchors.horizontalCenter: parent.horizontalCenter; width: Math.min(Style.space(30), keyGrid.cell * 0.42); height: width; source: root.actionIcon(modelData.action); visible: source.toString() !== ""; fillMode: Image.PreserveAspectFit; smooth: true }
                       Text { width: parent.width; horizontalAlignment: Text.AlignHCenter; elide: Text.ElideRight; text: root.actionName(modelData.action); textFormat: Text.PlainText; color: Color.foreground; font.family: Style.font.family; font.pixelSize: 9 }
                     }
                     MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.selectControl("key", index) }
@@ -212,6 +224,7 @@ Panel {
                 }
               }
               Column {
+                visible: root.hasDials
                 width: parent.width; spacing: Style.space(2)
                 Rectangle {
                   width: parent.width; height: Style.space(42); radius: 0; color: Qt.rgba(0, 0, 0, .5); border.color: Qt.rgba(1, 1, 1, .15)
@@ -318,7 +331,7 @@ Panel {
               onChanged: function(action) { root.saveAction("action", action) }
             }
             Column {
-              visible: root.selectedDevice === "streamdeck" && root.selectedControl === "dial"; width: parent.width; spacing: Style.space(10)
+              visible: root.selectedDevice === "streamdeck" && root.selectedControl === "dial" && root.hasDials; width: parent.width; spacing: Style.space(10)
               Repeater { model: [{slot:"left",label:"Turn left"},{slot:"press",label:"Press"},{slot:"right",label:"Turn right"}]
                 SearchableDropdown { required property var modelData; width: parent.width; label: modelData.label; options: root.actionOptions; value: (root.profile.dials[root.selectedIndex] || {})[modelData.slot] || ""; onChanged: function(action) { root.saveAction(modelData.slot, action) } }
               }
