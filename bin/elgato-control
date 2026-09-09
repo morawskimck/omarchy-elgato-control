@@ -330,6 +330,10 @@ def action_catalog():
                    for desktop_id, name in desktop_applications())
     return options
 
+# Panel firmware decodes 3-component baseline JPEG only; ImageMagick would
+# otherwise emit a 1-channel grayscale file for monochrome artwork.
+JPEG_OUTPUT = ["-colorspace", "sRGB", "-type", "TrueColor", "-interlace", "none"]
+
 def run_magick(command):
     try: subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=8)
     except (OSError, subprocess.SubprocessError): return False
@@ -343,19 +347,19 @@ def rendered_key_image(action, label, color, size=120, flip=False):
         if size == 120 and not flip: return existing
         if not converter: return None
         digest = hashlib.sha256(json.dumps(
-            ["artwork-v1", action, str(existing.stat().st_mtime_ns), size, flip]).encode()).hexdigest()[:20]
+            ["artwork-v2-truecolor", action, str(existing.stat().st_mtime_ns), size, flip]).encode()).hexdigest()[:20]
         KEY_CACHE.mkdir(parents=True, exist_ok=True)
         output = KEY_CACHE / (digest + ".jpg")
         if output.is_file(): return output
         command = [converter, str(existing), "-resize", "%dx%d!" % (size, size)]
         if flip: command += ["-rotate", "180"]
-        command += ["-quality", "92", str(output)]
+        command += JPEG_OUTPUT + ["-quality", "92", str(output)]
         return output if run_magick(command) else None
     if not converter: return None
     source = action_icon(action)
     source_stamp = str(pathlib.Path(source).stat().st_mtime_ns) if source and pathlib.Path(source).is_file() else "none"
     digest = hashlib.sha256(json.dumps(
-        ["renderer-v4-black", action, label, source, source_stamp, size, flip]).encode()).hexdigest()[:20]
+        ["renderer-v5-truecolor", action, label, source, source_stamp, size, flip]).encode()).hexdigest()[:20]
     KEY_CACHE.mkdir(parents=True, exist_ok=True)
     output = KEY_CACHE / (digest + ".jpg")
     if output.is_file(): return output
@@ -368,13 +372,15 @@ def rendered_key_image(action, label, color, size=120, flip=False):
         command += ["(", source, "-resize", "%dx%d" % (scaled(68), scaled(68)), ")",
                     "-gravity", "center", "-geometry", "+0-%d" % scaled(8), "-composite"]
     else:
-        initials = "".join(word[0] for word in safe_label.split()[:2]).upper() or "?"
+        trimmed = safe_label.strip()
+        initials = (trimmed if 0 < len(trimmed) <= 3
+                    else "".join(word[0] for word in trimmed.split()[:2]).upper() or "?")
         command += ["-fill", "white", "-pointsize", str(scaled(34)), "-gravity", "center",
                     "-annotate", "+0-%d" % scaled(8), initials]
     command += ["-fill", "white", "-pointsize", str(max(9, scaled(11))), "-gravity", "south",
                 "-annotate", "+0+%d" % scaled(9), safe_label]
     if flip: command += ["-rotate", "180"]
-    command += ["-quality", "92", str(output)]
+    command += JPEG_OUTPUT + ["-quality", "92", str(output)]
     return output if run_magick(command) else None
 
 def ensure_key_slots(profile, count):
@@ -382,7 +388,7 @@ def ensure_key_slots(profile, count):
     keys = profile.setdefault("keys", [])
     if len(keys) >= count: return False
     for index in range(len(keys), count):
-        keys.append({"label": "Key %d" % (index + 1), "action": "", "color": [40, 90, 130]})
+        keys.append({"label": str(index + 1), "action": "", "color": [40, 90, 130]})
     return True
 
 def desktop_file_exists(desktop_id):
