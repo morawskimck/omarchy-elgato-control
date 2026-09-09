@@ -193,10 +193,13 @@ Panel {
           width: parent.width; spacing: Style.space(14)
 
           Rectangle {
-            width: parent.width * 0.61; height: Style.space(310); radius: 0
+            width: parent.width * 0.61; radius: 0
+            height: Math.max(Style.space(310), root.selectedDevice === "streamdeck"
+                             ? deckColumn.implicitHeight + Style.space(28) : 0)
             color: Qt.rgba(0, 0, 0, 0.28); border.color: Qt.rgba(1, 1, 1, 0.14)
 
             Column {
+              id: deckColumn
               visible: root.selectedDevice === "streamdeck"; anchors.centerIn: parent; width: parent.width - Style.space(28); spacing: Style.space(10)
               Text { anchors.horizontalCenter: parent.horizontalCenter; text: (root.hasDeck && root.deck.label ? root.deck.label : "Stream Deck").toUpperCase(); color: Color.muted; font.family: Style.font.family; font.pixelSize: 10; font.bold: true }
               Grid {
