@@ -100,6 +100,11 @@ Panel {
   }
   function selectedLightReachable() { return selectedLights().some(function(light) { return light.reachable }) }
   function selectedLightOn() { return selectedLights().some(function(light) { return light.reachable && light.on }) }
+  // USB Key Light Neos report a brightness ceiling that depends on their power source.
+  function selectedLightLimit() {
+    var limits = selectedLights().filter(function(light) { return light.reachable && light.maxBrightness }).map(function(light) { return Number(light.maxBrightness) })
+    return limits.length ? Math.min.apply(null, limits) : 100
+  }
   function lightAction(action, value) {
     if (lightProc.running) return
     lightProc.command = [root.helper, "lights", action, "--target", root.selectedLightIndex < 0 ? "all" : String(root.selectedLightIndex)]
@@ -469,7 +474,7 @@ Panel {
               }
               Text { text: "BRIGHTNESS  " + root.selectedLightValue("brightness", 0) + "%"; color: Color.muted; font.family: Style.font.family; font.pixelSize: 9; font.bold: true }
               Controls.Slider {
-                id: lightBrightness; width: parent.width; from: 1; to: 100; stepSize: 1; value: root.selectedLightValue("brightness", 40); enabled: root.selectedLightReachable() && !lightProc.running
+                id: lightBrightness; width: parent.width; from: 1; to: root.selectedLightLimit(); stepSize: 1; value: root.selectedLightValue("brightness", 40); enabled: root.selectedLightReachable() && !lightProc.running
                 onPressedChanged: if (!pressed) root.lightAction("brightness", value)
                 background: Rectangle { x: lightBrightness.leftPadding; y: lightBrightness.topPadding + lightBrightness.availableHeight / 2 - height / 2; width: lightBrightness.availableWidth; height: Style.space(4); radius: 0; color: Qt.rgba(1,1,1,.12)
                   Rectangle { width: lightBrightness.visualPosition * parent.width; height: parent.height; radius: 0; color: Color.accent }

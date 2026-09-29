@@ -410,6 +410,120 @@ class PageProfileTests(unittest.TestCase):
         self.assertEqual([8, 8], [len(profile["keys"]), len(profile["pages"][0]["keys"])])
 
 
+def usb_light_report(body, kind=0x00, index=0, total=1):
+    data = body.encode()
+    report = bytearray(512)
+    report[0:4] = bytes([0x02, index, total, kind])
+    report[4:6] = len(data).to_bytes(2, "little")
+    report[6:6 + len(data)] = data
+    report[6 + len(data)] = 0x03
+    return bytes(report)
+
+
+class UsbKeyLightTests(unittest.TestCase):
+    def sysfs(self, root, name, hid_id, serial):
+        device = root / name / "device"
+        device.mkdir(parents=True)
+        (device / "uevent").write_text("DRIVER=hid-generic\nHID_ID=%s\nHID_NAME=Elgato\nHID_UNIQ=%s\n" % (hid_id, serial))
+
+    def test_request_fits_one_framed_report(self):
+        frames = module.usb_light_frames("GET /elgato/lights")
+        self.assertEqual(1, len(frames))
+        self.assertEqual(512, len(frames[0]))
+        self.assertEqual(bytes([0x02, 0, 1, 0x03, 18, 0]) + b"GET /elgato/lights" + b"\x03", frames[0][:25])
+        self.assertEqual(bytes(512 - 25), frames[0][25:])
+
+    def test_long_request_is_split_across_numbered_reports(self):
+        frames = module.usb_light_frames("x" * 600)
+        self.assertEqual([(0, 2, 505), (1, 2, 95)], [(f[1], f[2], int.from_bytes(f[4:6], "little")) for f in frames])
+        self.assertEqual(0x03, frames[1][6 + 95])
+
+    def test_response_reports_are_joined_in_order(self):
+        reports = iter([usb_light_report('{"lights":', index=0, total=2), usb_light_report("[]}", index=1, total=2)])
+        self.assertEqual('{"lights":[]}', module.read_usb_light_response(lambda: next(reports)))
+
+    def test_rejected_request_raises_the_device_message(self):
+        reports = iter([usb_light_report('{"errors":[{"message":"Invalid parameters","code":-1}]}', kind=0x07)])
+        with self.assertRaisesRegex(RuntimeError, "Invalid parameters"):
+            module.read_usb_light_response(lambda: next(reports))
+
+    def test_malformed_report_is_rejected(self):
+        report = bytearray(usb_light_report("{}"))
+        report[8] = 0x00  # trailer marker
+        with self.assertRaises(ValueError):
+            module.read_usb_light_response(lambda: bytes(report))
+
+    def test_discovery_finds_key_light_neo_hidraw_nodes_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            self.sysfs(root, "hidraw11", "0003:00000FD9:000000A0", "A7BTB41912OHLU")
+            self.sysfs(root, "hidraw15", "0003:00000FD9:0000009A", "A7BSA42312ZGQ1")
+            with mock.patch.object(module, "HIDRAW_SYSFS", root):
+                lights = module.discover_usb_lights()
+        self.assertEqual([{"name": "Key Light Neo", "transport": "usb", "path": "/dev/hidraw11",
+                           "serial": "A7BTB41912OHLU"}], lights)
+
+    def test_usb_light_path_must_be_a_key_light_hidraw_node(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            self.sysfs(root, "hidraw15", "0003:00000FD9:0000009A", "A7BSA42312ZGQ1")
+            with mock.patch.object(module, "HIDRAW_SYSFS", root):
+                for path in ("/dev/sda", "/dev/hidraw11/../sda", "/dev/hidraw15"):
+                    with self.assertRaises(ValueError): module.validate_usb_light(path)
+
+    def test_brightness_is_clamped_to_the_power_source_limit(self):
+        light = {"transport": "usb", "path": "/dev/hidraw11", "serial": "A"}
+        replies = ['{"power-info":{"maximumBrightness":65}}',
+                   '{"numberOfLights":1,"lights":[{"on":1,"brightness":65,"temperature":238}]}']
+        with mock.patch.object(module, "validate_usb_light", side_effect=lambda path: path), \
+             mock.patch.object(module, "USB_LIGHT_INFO", {}), \
+             mock.patch.object(module, "usb_light_exchange", side_effect=replies) as exchange:
+            state = module.light_request(light, {"brightness": 90, "on": 1})
+        self.assertEqual(mock.call("/dev/hidraw11", "GET /elgato/accessory-info"), exchange.call_args_list[0])
+        sent = exchange.call_args_list[1].args[1]
+        self.assertTrue(sent.startswith("PUT /elgato/lights "))
+        self.assertEqual({"numberOfLights": 1, "lights": [{"brightness": 65, "on": 1}]},
+                         module.json.loads(sent[len("PUT /elgato/lights "):]))
+        self.assertEqual(65, state["brightness"])
+
+    def test_usb_light_state_reports_its_brightness_limit(self):
+        light = {"transport": "usb", "path": "/dev/hidraw11", "serial": "A"}
+        replies = ['{"power-info":{"maximumBrightness":65}}',
+                   '{"numberOfLights":1,"lights":[{"on":0,"brightness":40,"temperature":238}]}']
+        with mock.patch.object(module, "validate_usb_light", side_effect=lambda path: path), \
+             mock.patch.object(module, "USB_LIGHT_INFO", {}), \
+             mock.patch.object(module, "usb_light_exchange", side_effect=replies):
+            state = module.light_request(light)
+        self.assertEqual({"on": 0, "brightness": 40, "temperature": 238, "maxBrightness": 65}, state)
+
+    def test_usb_lights_come_before_network_lights(self):
+        usb = {"name": "Key Light Neo", "transport": "usb", "path": "/dev/hidraw11", "serial": "A"}
+        with mock.patch.object(module, "discover_usb_lights", return_value=[usb]), \
+             mock.patch.object(module, "load_profile", return_value={"lights": [{"host": "left.local"}]}):
+            self.assertEqual([usb, {"host": "left.local"}], module.available_lights())
+
+    def test_daemon_light_actions_reach_usb_lights(self):
+        daemon = module.Daemon.__new__(module.Daemon)
+        daemon.status = {}
+        usb = {"name": "Key Light Neo", "transport": "usb", "path": "/dev/hidraw11", "reachable": True, "on": 0}
+        offline = {"name": "Desk", "host": "desk.local", "reachable": False}
+        daemon.light_states = [usb, offline]
+        daemon.refresh_lights = lambda: None
+        with mock.patch.object(module, "light_request") as request:
+            daemon.act_lights("lights_toggle")
+        request.assert_called_once_with(usb, {"on": 1})
+
+    def test_empty_network_discovery_is_not_repeated_every_poll(self):
+        daemon = module.Daemon.__new__(module.Daemon)
+        daemon.profile, daemon.status, daemon.devices = {}, {}, {}
+        daemon.discovered_lights, daemon.last_light_discovery = [], 0
+        with mock.patch.object(module, "discover_usb_lights", return_value=[]), \
+             mock.patch.object(module, "discover_lights", return_value=[]) as discover:
+            daemon.refresh_lights()
+            daemon.refresh_lights()
+        self.assertEqual(1, discover.call_count)
+
+
 class PedalParserTests(unittest.TestCase):
     def make_daemon(self):
         daemon = module.Daemon.__new__(module.Daemon)
@@ -479,6 +593,12 @@ class QmlPlainTextTests(unittest.TestCase):
         panel = self.PANEL.read_text()
         timer = next(x for x in panel.splitlines() if x.strip().startswith("Timer {") and "refresh" in x)
         self.assertNotIn("running: root.opened", timer)
+
+
+    def test_brightness_slider_stops_at_the_light_limit(self):
+        panel = self.PANEL.read_text()
+        slider = panel[panel.index("id: lightBrightness"):].split("\n", 1)[0]
+        self.assertIn("to: root.selectedLightLimit()", slider)
 
 
 if __name__ == "__main__":

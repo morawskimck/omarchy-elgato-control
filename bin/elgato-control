@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Small hidapi-based Stream Deck daemon for Omarchy."""
-import argparse, ctypes, hashlib, ipaddress, json, os, pathlib, re, shutil, signal, socket, subprocess, sys, tempfile, time, urllib.error, urllib.request
+import argparse, ctypes, fcntl, hashlib, ipaddress, json, os, pathlib, re, select, shutil, signal, socket, subprocess, sys, tempfile, time, urllib.error, urllib.request
 
 VID = 0x0FD9
 PLUS, PEDAL = 0x0084, 0x0086
@@ -135,7 +135,131 @@ class Hid:
         buf = (ctypes.c_ubyte * len(values))(*values)
         return self.lib.hid_write(dev, buf, len(values))
 
+HIDRAW_SYSFS = pathlib.Path("/sys/class/hidraw")
+# USB-attached lights speak the Wi-Fi Key Light JSON API framed in HID reports:
+# report id 0x02, frame index, frame count, message kind, u16 LE body length,
+# body, 0x03 trailer, zero padding to 512 bytes. A request body is
+# "GET <path>" or "PUT <path> <json>"; a response of any kind but 0x00 carries
+# {"errors": [...]}.
+USB_LIGHT_PRODUCTS = {0x00A0: "Key Light Neo"}
+USB_LIGHT_REPORT, USB_LIGHT_BODY, USB_LIGHT_TRAILER = 512, 505, 0x03
+USB_LIGHT_REQUEST, USB_LIGHT_OK = 0x03, 0x00
+USB_LIGHT_INFO = {}
+USB_LIGHT_INFO_TTL = 60.0
+
+def hidraw_ids(uevent):
+    fields = dict(line.split("=", 1) for line in uevent.splitlines() if "=" in line)
+    parts = fields.get("HID_ID", "").split(":")
+    try: return int(parts[1], 16), int(parts[2], 16), fields.get("HID_UNIQ", "")
+    except (IndexError, ValueError): return None, None, ""
+
+def discover_usb_lights():
+    lights = []
+    for entry in sorted(HIDRAW_SYSFS.glob("hidraw*")):
+        try: vendor, product, serial = hidraw_ids((entry / "device" / "uevent").read_text())
+        except OSError: continue
+        if vendor == VID and product in USB_LIGHT_PRODUCTS:
+            lights.append({"name": USB_LIGHT_PRODUCTS[product], "transport": "usb",
+                           "path": "/dev/" + entry.name, "serial": plain_text(serial)})
+    lights.sort(key=lambda light: (light["serial"], light["path"]))
+    if len(lights) > 1:
+        for light in lights: light["name"] += " " + (light["serial"][-4:] or light["path"][-2:])
+    return lights
+
+def validate_usb_light(path):
+    """Accept only a hidraw node that sysfs reports as a supported USB light."""
+    match = re.fullmatch(r"/dev/(hidraw\d+)", str(path))
+    if match:
+        try: vendor, product, _serial = hidraw_ids((HIDRAW_SYSFS / match.group(1) / "device" / "uevent").read_text())
+        except OSError: vendor = product = None
+        if vendor == VID and product in USB_LIGHT_PRODUCTS: return path
+    raise ValueError("Not a USB Key Light: " + plain_text(path))
+
+def usb_light_frames(text):
+    body = text.encode()
+    chunks = [body[i:i + USB_LIGHT_BODY] for i in range(0, len(body), USB_LIGHT_BODY)] or [b""]
+    if len(chunks) > 255: raise ValueError("Key Light request is too large")
+    frames = []
+    for index, chunk in enumerate(chunks):
+        report = bytearray(USB_LIGHT_REPORT)
+        report[0:6] = bytes([0x02, index, len(chunks), USB_LIGHT_REQUEST]) + len(chunk).to_bytes(2, "little")
+        report[6:6 + len(chunk)] = chunk
+        report[6 + len(chunk)] = USB_LIGHT_TRAILER
+        frames.append(bytes(report))
+    return frames
+
+def read_usb_light_response(read_report):
+    """Join a framed response; `read_report` returns the next 512-byte report."""
+    body, expected, total, kind = b"", 0, None, USB_LIGHT_OK
+    while total is None or expected < total:
+        report = read_report()
+        if len(report) != USB_LIGHT_REPORT or report[0] != 0x02: raise ValueError("Unexpected Key Light report")
+        index, count, size = report[1], report[2], int.from_bytes(report[4:6], "little")
+        if (count == 0 or index != expected or (total is not None and count != total)
+                or size > USB_LIGHT_BODY or report[6 + size] != USB_LIGHT_TRAILER):
+            raise ValueError("Malformed Key Light report")
+        if total is None: total, kind = count, report[3]
+        body += report[6:6 + size]; expected += 1
+    text = body.decode("utf-8", "replace")
+    if kind != USB_LIGHT_OK:
+        try: message = json.loads(text)["errors"][0]["message"]
+        except (ValueError, KeyError, IndexError, TypeError): message = "request rejected (kind 0x%02x)" % kind
+        raise RuntimeError("Key Light: " + plain_text(message))
+    return text
+
+def usb_light_exchange(path, text, timeout=1.5, lock_timeout=5.0):
+    """Send one request to a USB light and return the response body.
+
+    hidraw hands every open descriptor a copy of every input report, so the
+    daemon and the panel's CLI take turns with flock and drop stale reports
+    before writing. A request takes 5-60 ms.
+    """
+    frames = usb_light_frames(text)
+    fd = os.open(path, os.O_RDWR | os.O_NONBLOCK)
+    try:
+        deadline = time.monotonic() + lock_timeout
+        while True:
+            try: fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB); break
+            except BlockingIOError:
+                if time.monotonic() >= deadline: raise TimeoutError("Key Light is busy")
+                time.sleep(0.01)
+        while select.select([fd], [], [], 0)[0]: os.read(fd, USB_LIGHT_REPORT)
+        for frame in frames: os.write(fd, frame)
+        deadline = time.monotonic() + timeout
+        def read_report():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not select.select([fd], [], [], remaining)[0]:
+                raise TimeoutError("Key Light did not respond")
+            return os.read(fd, USB_LIGHT_REPORT)
+        return read_usb_light_response(read_report)
+    finally: os.close(fd)
+
+def usb_light_limit(light, path):
+    """The light's brightness ceiling, which depends on its power source.
+
+    The firmware rejects a brightness above it as invalid.
+    """
+    key = (path, light.get("serial", ""))
+    cached = USB_LIGHT_INFO.get(key)
+    if not cached or time.monotonic() - cached[0] > USB_LIGHT_INFO_TTL:
+        info = json.loads(usb_light_exchange(path, "GET /elgato/accessory-info"))
+        limit = (info.get("power-info") or {}).get("maximumBrightness", 100)
+        cached = USB_LIGHT_INFO[key] = (time.monotonic(), max(1, min(100, int(limit))))
+    return cached[1]
+
+def usb_light_request(light, payload=None):
+    path = validate_usb_light(light.get("path", ""))
+    limit = usb_light_limit(light, path)
+    if payload is None: text = "GET /elgato/lights"
+    else:
+        payload = dict(payload)
+        if "brightness" in payload: payload["brightness"] = max(1, min(limit, int(payload["brightness"])))
+        text = "PUT /elgato/lights " + json.dumps({"numberOfLights": 1, "lights": [payload]}, separators=(",", ":"))
+    state = json.loads(usb_light_exchange(path, text))["lights"][0]
+    return dict(state, maxBrightness=limit)
+
 def light_request(light, payload=None):
+    if light.get("transport") == "usb": return usb_light_request(light, payload)
     host = validate_light_host(light.get("host", ""))
     port = int(light.get("port", 9123))
     if port < 1 or port > 65535: raise ValueError("Invalid Key Light port")
@@ -208,7 +332,7 @@ def discover_lights(timeout=3):
 
 def available_lights():
     configured = load_profile().get("lights", [])
-    return configured or discover_lights()
+    return discover_usb_lights() + (configured or discover_lights())
 
 def light_states(lights):
     states = []
@@ -715,7 +839,7 @@ class Daemon:
         self.brightness = int(self.profile.get("brightness", 55))
         self.light_states = []
         self.discovered_lights = []
-        self.last_light_discovery = 0
+        self.last_light_discovery = None
         self.lcd_signature = None
         self.page = 0
         self.running = True
@@ -886,13 +1010,21 @@ class Daemon:
         except OSError as e: self.status["error"] = str(e)
         self.status["lastAction"] = action + " release"; self.status["lastEvent"] = time.strftime("%H:%M:%S")
 
-    def refresh_lights(self):
+    def light_sources(self):
+        """USB lights, then the configured or mDNS-discovered network lights."""
         configured = self.profile.get("lights", [])
-        if not configured and (not self.discovered_lights or time.monotonic() - self.last_light_discovery > 300):
+        now = time.monotonic()
+        # avahi-browse blocks HID polling for about a second, so an empty
+        # network is rescanned once a minute rather than on every refresh.
+        interval = 300 if self.discovered_lights else 60
+        if not configured and (self.last_light_discovery is None or now - self.last_light_discovery > interval):
             self.discovered_lights = discover_lights()
-            self.last_light_discovery = time.monotonic()
+            self.last_light_discovery = now
+        return discover_usb_lights() + (configured or self.discovered_lights)
+
+    def refresh_lights(self):
         states = []
-        for light in configured or self.discovered_lights:
+        for light in self.light_sources():
             entry = dict(light)
             try: entry.update(light_request(light)); entry["reachable"] = True
             except Exception as e: entry["reachable"] = False; entry["error"] = str(e)
@@ -912,7 +1044,7 @@ class Daemon:
         elif action == "lights_warmer": payload = {"temperature": min(344, int(current.get("temperature", 200)) + 10), "on": 1}
         elif action == "lights_cooler": payload = {"temperature": max(143, int(current.get("temperature", 200)) - 10), "on": 1}
         else: return
-        for light in self.profile.get("lights", []) or self.discovered_lights:
+        for light in reachable:
             try: light_request(light, payload)
             except Exception as e: self.status["error"] = "Light: " + str(e)
         self.refresh_lights()
