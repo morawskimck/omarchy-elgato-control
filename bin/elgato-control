@@ -283,8 +283,14 @@ def resolve_icon(icon):
         return 20
     return str(sorted(candidates, key=score)[0])
 
+# Functions that share another function's bundled artwork.
+ARTWORK_ALIASES = {"wave_mute": "mic_mute"}
+
+def builtin_artwork(action):
+    return ICONS / (ARTWORK_ALIASES.get(action, action) + ".jpg")
+
 def action_icon(action):
-    built_in = ICONS / (action + ".jpg")
+    built_in = builtin_artwork(action)
     if built_in.is_file(): return str(built_in)
     if action.startswith("app:"):
         return resolve_icon(desktop_entry(action[4:]).get("Icon", ""))
@@ -299,7 +305,7 @@ def action_catalog():
     return options
 
 def rendered_key_image(action, label, color):
-    existing = ICONS / (action + ".jpg")
+    existing = builtin_artwork(action)
     if existing.is_file(): return existing
     converter = shutil.which("magick") or shutil.which("convert")
     if not converter: return None

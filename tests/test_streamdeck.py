@@ -176,6 +176,11 @@ class DeviceModelTests(unittest.TestCase):
         self.assertEqual([mock.call(2, "Mic Capture Volume", 60), mock.call(2, "Mic Capture Volume", 40),
                           mock.call(2, "Mic Capture Volume", 20)], setter.call_args_list)
 
+    def test_wave_mute_reuses_the_microphone_artwork(self):
+        artwork = module.ICONS / "mic_mute.jpg"
+        self.assertEqual(str(artwork), module.action_icon("wave_mute"))
+        self.assertEqual(artwork, module.rendered_key_image("wave_mute", "Wave Microphone Mute", [220, 65, 65]))
+
     def test_wave_push_to_default_uses_detected_source(self):
         wave = {"card": 2, "gainRaw": 40, "sourceId": 89}
         with mock.patch.object(module, "set_default_wave_source") as setter:
