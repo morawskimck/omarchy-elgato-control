@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Small hidapi-based Stream Deck daemon for Omarchy."""
 import argparse, ctypes, hashlib, ipaddress, json, os, pathlib, re, shutil, signal, socket, subprocess, sys, tempfile, time, urllib.error, urllib.request
+from xml.sax.saxutils import escape
 
 VID = 0x0FD9
 PLUS, PEDAL = 0x0084, 0x0086
@@ -621,7 +622,7 @@ def lcd_svg(profile, brightness, light_states):
     cells = []
     for i in range(4):
         label = dials[i].get("label", "Dial %d" % (i + 1)) if i < len(dials) else "Dial %d" % (i + 1)
-        label = (label[:22].replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+        label = escape(label[:22])
         x = i * 200
         cells.append('<rect x="%d" y="0" width="198" height="100" rx="10" fill="#141820" stroke="#303846"/>' % x)
         cells.append('<circle cx="%d" cy="50" r="27" fill="none" stroke="%s" stroke-width="6" stroke-dasharray="125 45"/>' % (x + 44, colors[i]))
@@ -643,9 +644,8 @@ def render_svg_jpeg(svg, rotate=False):
         return output.read_bytes()
 
 def svg_text(x, y, value, size, color, weight="normal", anchor="start"):
-    value = str(value).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
     return ('<text x="%d" y="%d" fill="%s" font-size="%d" font-family="sans-serif" font-weight="%s" '
-            'text-anchor="%s">%s</text>' % (x, y, color, size, weight, anchor, value))
+            'text-anchor="%s">%s</text>' % (x, y, color, size, weight, anchor, escape(str(value))))
 
 def neo_screen_svg(now, page, pages, mic_muted, lights):
     """The Stream Deck Neo info screen: clock and date, then page and status lines."""
@@ -685,10 +685,15 @@ class Daemon:
         path = rendered_key_image(action, key.get("label", action_label(action)), key.get("color", [42, 54, 72]),
                                   size=spec.get("keySize", 120), flip=spec.get("flip", False))
         if not path or not path.exists(): return
-        data = path.read_bytes(); page = 0
+        self.write_paged(dev, 0x07, index, path.read_bytes())
+
+    def write_paged(self, dev, command, index, data):
+        """Send image data in 1016-byte pages: report 0x02, command, index,
+        final flag, u16 LE length, u16 LE page number, padded to 1024 bytes."""
+        page = 0
         for offset in range(0, len(data), 1016):
             payload = data[offset:offset + 1016]; final = offset + len(payload) >= len(data)
-            header = [0x02, 0x07, index, 1 if final else 0, len(payload) & 255, len(payload) >> 8, page & 255, page >> 8]
+            header = [0x02, command, index, 1 if final else 0, len(payload) & 255, len(payload) >> 8, page & 255, page >> 8]
             self.hid.write(dev, header + list(payload) + [0] * (1016 - len(payload)))
             page += 1
 
@@ -699,7 +704,11 @@ class Daemon:
         # not keep artwork from a previous session; a redraw does not need it.
         if reset and "lcd" not in capabilities: self.hid.feature(dev, [0x03, 0x02])
         self.hid.feature(dev, [0x03, 0x08, max(0, min(100, self.brightness))])
-        for i, key in enumerate(page_keys(self.profile, self.page)[:spec.get("keys", 8)]):
+        count = spec.get("keys", 8)
+        keys = page_keys(self.profile, self.page)
+        # A hand-edited page may be shorter than the panel; draw the rest blank
+        # so a page flip does not leave the previous page's artwork behind.
+        for i, key in enumerate((keys + [blank_key(i) for i in range(len(keys), count)])[:count]):
             if "touch" in capabilities:
                 color = key.get("color", [40, 90, 130])
                 self.hid.feature(dev, [0x03, 0x06, i] + [int(x) & 255 for x in color[:3]])
@@ -708,7 +717,7 @@ class Daemon:
             # The touch sensors flip pages, so they light only when there is another page.
             color = TOUCH_COLOR if page_count(self.profile) > 1 else [0, 0, 0]
             for sensor in range(spec.get("touchKeys", 0)):
-                self.hid.feature(dev, [0x03, 0x06, spec["keys"] + sensor] + color)
+                self.hid.feature(dev, [0x03, 0x06, count + sensor] + color)
         if "lcd" in capabilities: self.update_lcd(dev, force=True)
         if "screen" in capabilities: self.update_screen(device, force=True)
 
@@ -719,6 +728,16 @@ class Daemon:
     def clamp_page(self):
         self.page = max(0, min(self.page, page_count(self.profile) - 1))
 
+    def follow_page(self, previous):
+        """Keep showing the same keys after a profile reload: removing an
+        earlier page shifts the live page down, while an edit to the live
+        page leaves it in place."""
+        try: live = page_keys(previous, self.page)
+        except ValueError: live = None
+        matches = [page for page in range(page_count(self.profile)) if page_keys(self.profile, page) == live]
+        if matches: self.page = min(matches, key=lambda page: abs(page - self.page))
+        self.clamp_page()
+
     def flip_page(self, delta):
         count = page_count(self.profile)
         if count <= 1: return
@@ -727,15 +746,8 @@ class Daemon:
         self.redraw_decks()
 
     def write_window(self, dev, data):
-        """Upload a full-window JPEG in 1016-byte pages (report 0x02, command 0x0B)."""
-        page = 0
-        for offset in range(0, len(data), 1016):
-            payload = data[offset:offset + 1016]
-            final = offset + len(payload) >= len(data)
-            header = [0x02, 0x0B, 0, 1 if final else 0, len(payload) & 255,
-                      len(payload) >> 8, page & 255, page >> 8]
-            self.hid.write(dev, header + list(payload) + [0] * (1016 - len(payload)))
-            page += 1
+        """Upload a full-window JPEG: the Plus LCD strip or the Neo info screen."""
+        self.write_paged(dev, 0x0B, 0, data)
 
     def update_screen(self, device, force=False):
         now = time.localtime()
@@ -796,6 +808,7 @@ class Daemon:
                             "capabilities": ["lights", "power", "brightness", "temperature"],
                             "count": len([x for x in self.status["lights"] if x.get("reachable")])})
         self.status["devices"] = devices
+        if self.screen_devices(): self.status["micMuted"] = mic_muted(self.status.get("wave"))
 
     def grow_profile(self, count):
         """Add key slots for a panel with more keys than the profile has.
@@ -932,16 +945,14 @@ class Daemon:
             try:
                 mtime = PROFILE.stat().st_mtime
                 if mtime != self.mtime:
-                    self.profile, self.mtime = load_profile(), mtime
+                    previous, self.profile, self.mtime = self.profile, load_profile(), mtime
                     self.lcd_signature = None
-                    self.clamp_page()
+                    self.follow_page(previous)
                     for device in self.devices.values():
                         if device["kind"] == "streamdeck": self.decorate(device)
             except (OSError, ValueError, json.JSONDecodeError) as e: self.status["error"] = "Profile: " + str(e)
             if now - last_screen > 1:
-                screens = self.screen_devices()
-                if screens: self.status["micMuted"] = mic_muted(self.status.get("wave"))
-                for device in screens: self.update_screen(device)
+                for device in self.screen_devices(): self.update_screen(device)
                 last_screen = now
             for d in list(self.devices.values()):
                 data = self.hid.read(d["handle"])
