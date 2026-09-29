@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Support the Wave Neo: find its gain and mute under the `PCM Capture` mixer names it exposes instead of the Wave:3's `Mic Capture` ones, read gain in dB from the range the firmware reports, and convert the 1 dB gain step and the presets to that range.
+- Name the Wave device page after the detected model instead of always showing Wave:3.
+- Count a Wave or a reachable Key Light as connected, and keep polling status while the panel is closed, so the bar icon no longer shows Disconnected until the panel is first opened.
+
 ## 0.3.1 — 2026-08-20
 
 - Force `Text.PlainText` for Key Light names and other externally supplied panel strings so QML AutoText cannot load markup or remote resources.

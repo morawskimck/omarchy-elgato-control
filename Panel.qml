@@ -16,10 +16,11 @@ Panel {
   property var status: ({ running: false, plus: null, pedal: null, profile: "Omarchy Default", brightness: 55 })
   property var profile: ({ keys: [], dials: [], pedals: [] })
   property string error: ""
-  readonly property bool connected: status.plus !== null || status.pedal !== null
+  readonly property bool connected: status.plus !== null || status.pedal !== null || hasWave || hasLights
   readonly property bool hasPlus: status.plus !== null
   readonly property bool hasPedal: status.pedal !== null
   readonly property bool hasWave: status.wave !== null && status.wave !== undefined
+  readonly property string waveName: hasWave && status.wave.product ? String(status.wave.product).replace(/^Elgato /, "") : "Wave"
   readonly property bool hasLights: (status.lights || []).some(function(x) { return x.reachable })
   readonly property string helper: Qt.resolvedUrl("bin/elgato-control").toString().replace("file://", "")
   property var actionOptions: []
@@ -33,7 +34,7 @@ Panel {
   readonly property var deviceOptions: [
     hasPlus ? { value: "streamdeck", label: "Stream Deck +" } : null,
     hasPedal ? { value: "pedal", label: "Pedal" } : null,
-    hasWave ? { value: "wave", label: "Wave:3" } : null,
+    hasWave ? { value: "wave", label: root.waveName } : null,
     hasLights ? { value: "lights", label: "Key Lights" } : null
   ].filter(function(x) { return x !== null })
 
@@ -84,6 +85,8 @@ Panel {
   function open() { root.controller.show(); refresh() }
   function close() { root.controller.hide() }
   function toggle() { if (root.opened) close(); else open() }
+  // The bar icon reads `connected`, so status keeps polling while the panel is closed.
+  function pollStatus() { if (!statusProc.running) statusProc.running = true }
   function refresh() {
     if (!statusProc.running) statusProc.running = true
     if (!profileProc.running) profileProc.running = true
@@ -138,7 +141,7 @@ Panel {
     }
     onExited: function(code) { if (code !== 0) root.error = "Key Light control failed"; root.refresh() }
   }
-  Timer { interval: 1500; repeat: true; running: root.opened; triggeredOnStart: true; onTriggered: root.refresh() }
+  Timer { interval: root.opened ? 1500 : 10000; repeat: true; running: true; triggeredOnStart: true; onTriggered: root.opened ? root.refresh() : root.pollStatus() }
 
   KeyboardPanel {
     id: panel
@@ -307,7 +310,7 @@ Panel {
             width: parent.width * 0.39 - Style.space(14); spacing: Style.space(10)
             Text { text: "ACTION INSPECTOR"; color: Color.muted; font.family: Style.font.family; font.pixelSize: 10; font.bold: true }
             Text {
-              text: root.selectedDevice === "streamdeck" ? (root.selectedControl === "key" ? "Key " + (root.selectedIndex + 1) : "Dial " + (root.selectedIndex + 1)) : root.selectedDevice === "pedal" ? ["Left pedal", "Middle pedal", "Right pedal"][root.selectedIndex] : root.selectedDevice === "wave" ? "Wave:3" : root.selectedLightName(); textFormat: Text.PlainText
+              text: root.selectedDevice === "streamdeck" ? (root.selectedControl === "key" ? "Key " + (root.selectedIndex + 1) : "Dial " + (root.selectedIndex + 1)) : root.selectedDevice === "pedal" ? ["Left pedal", "Middle pedal", "Right pedal"][root.selectedIndex] : root.selectedDevice === "wave" ? root.waveName : root.selectedLightName(); textFormat: Text.PlainText
               color: Color.foreground; font.family: Style.font.family; font.pixelSize: 15; font.bold: true
             }
             Text { visible: root.selectedDevice === "streamdeck" || root.selectedDevice === "pedal"; width: parent.width; wrapMode: Text.WordWrap; text: "Choose an application, system function, or key. Changes apply immediately."; color: Color.muted; font.family: Style.font.family; font.pixelSize: 10 }
