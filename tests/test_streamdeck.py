@@ -117,6 +117,28 @@ class DeviceModelTests(unittest.TestCase):
         self.assertEqual(30.0, wave["gainDbMax"])
         self.assertTrue(wave["muted"])
 
+    def test_wave_mixer_names_are_probed_once_per_card(self):
+        controls = {"PCM Capture Volume": {"value": 40, "min": 0, "max": 80, "percent": 50, "dbMin": 0.0, "dbMax": 30.0},
+                    "PCM Capture Switch": {"on": True}}
+        reads = []
+        def read(card, name):
+            reads.append(name); return controls.get(name)
+        with mock.patch.object(module, "read_alsa_control", side_effect=read), \
+             mock.patch.object(module, "WAVE_CONTROL_NAMES", {}):
+            module.read_wave_controls(0)
+            reads.clear()
+            module.read_wave_controls(0)
+        self.assertNotIn("Mic Capture Volume", reads)
+        self.assertNotIn("Mic Capture Switch", reads)
+
+    def test_wave_mixer_names_are_probed_again_when_a_card_changes(self):
+        with mock.patch.object(module, "WAVE_CONTROL_NAMES", {0: {module.WAVE_GAIN_CONTROLS: "PCM Capture Volume"}}), \
+             mock.patch.object(module, "read_alsa_control",
+                               side_effect=lambda card, name: {"value": 60, "min": 0, "max": 80, "percent": 75}
+                               if name == "Mic Capture Volume" else None):
+            name, control = module.first_alsa_control(0, module.WAVE_GAIN_CONTROLS)
+        self.assertEqual("Mic Capture Volume", name)
+
     def test_wave_three_gain_keeps_mic_capture_controls(self):
         controls = {"Mic Capture Volume": {"value": 40, "min": 0, "max": 80, "percent": 50},
                     "Mic Capture Switch": {"on": True}}

@@ -711,10 +711,21 @@ WAVE_MUTE_CONTROLS = ("Mic Capture Switch", "PCM Capture Switch")
 # Used when the firmware publishes no dB range: the Wave:3's 0-80 steps are 0.5 dB.
 WAVE_GAIN_SCALE = {"gainMin": 0, "gainMax": 80, "gainDbMin": 0.0, "gainDbMax": 40.0}
 
+# card -> candidate names -> the name that card has, so detect_wave (every 2 s)
+# does not keep probing controls the microphone lacks.
+WAVE_CONTROL_NAMES = {}
+
 def first_alsa_control(card, names):
+    """Read the first of `names` the card has, remembering which one it was."""
+    known = WAVE_CONTROL_NAMES.get(card, {}).get(names)
+    if known:
+        control = read_alsa_control(card, known)
+        if control: return known, control
     for name in names:
         control = read_alsa_control(card, name)
-        if control: return name, control
+        if control:
+            WAVE_CONTROL_NAMES.setdefault(card, {})[names] = name
+            return name, control
     return names[0], {}
 
 def wave_scale(wave):
