@@ -74,10 +74,12 @@ Panel {
   }
   function selectedLightReachable() { return selectedLights().some(function(light) { return light.reachable }) }
   function selectedLightOn() { return selectedLights().some(function(light) { return light.reachable && light.on }) }
-  // USB Key Light Neos report a brightness ceiling that depends on their power source.
+  // USB Key Light Neos report a brightness ceiling that depends on their power
+  // source. The daemon clamps each light to its own, so a group slider may
+  // reach the highest one.
   function selectedLightLimit() {
-    var limits = selectedLights().filter(function(light) { return light.reachable && light.maxBrightness }).map(function(light) { return Number(light.maxBrightness) })
-    return limits.length ? Math.min.apply(null, limits) : 100
+    var limits = selectedLights().filter(function(light) { return light.reachable }).map(function(light) { return Number(light.maxBrightness || 100) })
+    return limits.length ? Math.max.apply(null, limits) : 100
   }
   function lightAction(action, value) {
     if (lightProc.running) return
