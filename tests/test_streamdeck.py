@@ -165,6 +165,189 @@ class DeviceModelTests(unittest.TestCase):
         request.assert_called_once_with(lights[0], {"temperature": 200, "on": 1})
 
 
+class FakeHid:
+    def __init__(self):
+        self.features, self.writes = [], []
+    def feature(self, dev, values): self.features.append(values)
+    def write(self, dev, values): self.writes.append(values)
+
+
+def neo_report(keys=(), touch=()):
+    """A Stream Deck Neo input report: 8 key bytes, then the left and right touch sensors."""
+    states = [1 if i in keys else 0 for i in range(8)] + [1 if i in touch else 0 for i in ("left", "right")]
+    return bytes([0x01, 0x00, len(states), 0x00] + states)
+
+
+def paged_profile(pages=3):
+    keys = [[{"label": "p%dk%d" % (page, key), "action": "page%d_key%d" % (page, key)} for key in range(8)]
+            for page in range(pages)]
+    return {"keys": keys[0], "pages": [{"keys": page} for page in keys[1:]]}
+
+
+class StreamDeckNeoTests(unittest.TestCase):
+    def make_daemon(self, profile=None, record=True):
+        daemon = module.Daemon.__new__(module.Daemon)
+        daemon.hid, daemon.previous, daemon.page = FakeHid(), {}, 0
+        daemon.profile = profile or paged_profile()
+        daemon.status, daemon.devices, daemon.light_states = {}, {}, []
+        daemon.brightness = 55
+        daemon.actions = []
+        if record: daemon.act = daemon.actions.append
+        return daemon
+
+    def neo(self):
+        return {"path": "/dev/hidraw15", "productId": module.NEO, "handle": object(), "kind": "streamdeck"}
+
+    def test_neo_is_a_paged_eight_key_panel_with_an_info_screen(self):
+        spec = module.DEVICE_SPECS[module.NEO]
+        self.assertEqual((8, 4, 96, True), (spec["keys"], spec["columns"], spec["keySize"], spec["flip"]))
+        self.assertIn("pages", spec["capabilities"])
+        self.assertIn("screen", spec["capabilities"])
+        self.assertNotIn("lcd", spec["capabilities"])
+
+    def test_key_press_runs_the_action_on_the_current_page(self):
+        daemon = self.make_daemon(); daemon.page = 1
+        device = self.neo()
+        daemon.parse_deck(neo_report(keys=[2]), device)
+        daemon.parse_deck(neo_report(keys=[2]), device)
+        self.assertEqual(["page1_key2"], daemon.actions)
+
+    def test_touch_sensors_flip_pages_and_wrap(self):
+        daemon = self.make_daemon()
+        with mock.patch.object(module.Daemon, "redraw_decks"):
+            device = self.neo()
+            daemon.parse_deck(neo_report(touch=["left"]), device)
+            self.assertEqual(2, daemon.page)
+            daemon.parse_deck(neo_report(), device)
+            daemon.parse_deck(neo_report(touch=["right"]), device)
+            self.assertEqual(0, daemon.page)
+            daemon.parse_deck(neo_report(touch=["right"]), device)
+            self.assertEqual(0, daemon.page, "a held sensor flips once")
+        self.assertEqual([], daemon.actions)
+
+    def test_single_page_profile_does_not_flip(self):
+        daemon = self.make_daemon(paged_profile(pages=1))
+        with mock.patch.object(module.Daemon, "redraw_decks") as redraw:
+            daemon.flip_page(1)
+        self.assertEqual(0, daemon.page)
+        redraw.assert_not_called()
+
+    def test_page_actions_flip_from_any_control(self):
+        daemon = self.make_daemon(record=False)
+        with mock.patch.object(module.Daemon, "redraw_decks"):
+            daemon.act("page_next"); daemon.act("page_next"); daemon.act("page_prev")
+        self.assertEqual(1, daemon.page)
+        self.assertTrue(module.valid_action("page_next"))
+        self.assertTrue(module.valid_action("page_prev"))
+
+    def test_panels_without_pages_do_not_read_touch_sensors(self):
+        daemon = self.make_daemon()
+        report = bytes([0x01, 0x00, 8, 0x00] + [0] * 8 + [1, 0])
+        daemon.parse_deck(report, {"path": "/dev/hidraw2", "productId": module.PLUS, "handle": object()})
+        self.assertEqual(0, daemon.page)
+
+    def test_decorate_draws_the_current_page_and_lights_the_touch_sensors(self):
+        daemon = self.make_daemon(); daemon.page = 2
+        drawn = []
+        with mock.patch.object(module.Daemon, "key_image", lambda self, dev, index, key, spec: drawn.append(key["action"])), \
+             mock.patch.object(module.Daemon, "update_screen"):
+            daemon.decorate(self.neo())
+        self.assertEqual(["page2_key%d" % i for i in range(8)], drawn)
+        self.assertEqual({8, 9}, {f[2] for f in daemon.hid.features if f[:2] == [0x03, 0x06]})
+
+    def test_single_page_profile_leaves_touch_sensors_dark(self):
+        daemon = self.make_daemon(paged_profile(pages=1))
+        with mock.patch.object(module.Daemon, "key_image"), mock.patch.object(module.Daemon, "update_screen"):
+            daemon.decorate(self.neo())
+        touch = [f for f in daemon.hid.features if f[:2] == [0x03, 0x06]]
+        self.assertEqual([[0x03, 0x06, 8, 0, 0, 0], [0x03, 0x06, 9, 0, 0, 0]], touch)
+
+    def test_window_image_is_sent_in_paged_reports(self):
+        daemon = self.make_daemon()
+        daemon.write_window(object(), bytes(range(256)) * 6)  # 1536 bytes
+        self.assertEqual(2, len(daemon.hid.writes))
+        self.assertEqual([0x02, 0x0B, 0, 0, 1016 & 255, 1016 >> 8, 0, 0], daemon.hid.writes[0][:8])
+        self.assertEqual([0x02, 0x0B, 0, 1, 520 & 255, 520 >> 8, 1, 0], daemon.hid.writes[1][:8])
+        self.assertEqual(1024, len(daemon.hid.writes[1]))
+
+    def test_info_screen_shows_clock_page_and_status(self):
+        now = module.time.struct_time((2026, 9, 29, 14, 32, 0, 1, 272, 0))
+        svg = module.neo_screen_svg(now, page=1, pages=3, mic_muted=True, lights=[{"reachable": True, "on": 1, "brightness": 65}])
+        self.assertIn('width="248" height="58"', svg)
+        self.assertIn("14:32", svg)
+        self.assertIn("2/3", svg)
+        self.assertIn("MUTED", svg)
+        self.assertIn("65%", svg)
+
+    def test_info_screen_omits_page_count_for_one_page(self):
+        now = module.time.struct_time((2026, 9, 29, 9, 5, 0, 1, 272, 0))
+        svg = module.neo_screen_svg(now, page=0, pages=1, mic_muted=False, lights=[])
+        self.assertIn("09:05", svg)
+        self.assertNotIn("1/1", svg)
+        self.assertNotIn("MUTED", svg)
+
+    def test_profile_reload_keeps_the_page_in_range(self):
+        daemon = self.make_daemon(); daemon.page = 2
+        daemon.profile = paged_profile(pages=2)
+        daemon.clamp_page()
+        self.assertEqual(1, daemon.page)
+
+
+class PageProfileTests(unittest.TestCase):
+    def with_profile(self, profile):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        config = pathlib.Path(directory.name)
+        path = config / "profile.json"
+        path.write_text(module.json.dumps(profile))
+        for name, value in (("CONFIG", config), ("PROFILE", path)):
+            patcher = mock.patch.object(module, name, value); patcher.start(); self.addCleanup(patcher.stop)
+        return path
+
+    def test_page_one_is_the_keys_list(self):
+        profile = paged_profile(pages=2)
+        self.assertIs(profile["keys"], module.page_keys(profile, 0))
+        self.assertIs(profile["pages"][0]["keys"], module.page_keys(profile, 1))
+        self.assertEqual(2, module.page_count(profile))
+        self.assertEqual(1, module.page_count({"keys": []}))
+
+    def test_added_page_matches_page_one_size(self):
+        path = self.with_profile(paged_profile(pages=1))
+        self.assertEqual(2, module.add_page())
+        saved = module.json.loads(path.read_text())
+        self.assertEqual(8, len(saved["pages"][0]["keys"]))
+        self.assertEqual("", saved["pages"][0]["keys"][0]["action"])
+
+    def test_removing_page_one_promotes_page_two(self):
+        path = self.with_profile(paged_profile(pages=3))
+        module.remove_page(0)
+        saved = module.json.loads(path.read_text())
+        self.assertEqual("page1_key0", saved["keys"][0]["action"])
+        self.assertEqual(["page2_key0"], [p["keys"][0]["action"] for p in saved["pages"]])
+
+    def test_removing_the_last_extra_page_drops_the_pages_list(self):
+        path = self.with_profile(paged_profile(pages=2))
+        module.remove_page(1)
+        self.assertNotIn("pages", module.json.loads(path.read_text()))
+
+    def test_the_only_page_cannot_be_removed(self):
+        self.with_profile(paged_profile(pages=1))
+        with self.assertRaises(ValueError): module.remove_page(0)
+
+    def test_set_key_writes_to_the_selected_page(self):
+        path = self.with_profile(paged_profile(pages=2))
+        module.set_control_action("keys", 3, "action", "lock", page=1)
+        saved = module.json.loads(path.read_text())
+        self.assertEqual("lock", saved["pages"][0]["keys"][3]["action"])
+        self.assertEqual("page0_key3", saved["keys"][3]["action"])
+        with self.assertRaises(ValueError): module.set_control_action("keys", 0, "action", "lock", page=2)
+
+    def test_key_slots_grow_on_every_page(self):
+        profile = {"keys": [], "pages": [{"keys": []}]}
+        self.assertTrue(module.ensure_key_slots(profile, 8))
+        self.assertEqual([8, 8], [len(profile["keys"]), len(profile["pages"][0]["keys"])])
+
+
 class PedalParserTests(unittest.TestCase):
     def make_daemon(self):
         daemon = module.Daemon.__new__(module.Daemon)
@@ -207,6 +390,17 @@ class QmlPlainTextTests(unittest.TestCase):
         )
         for binding in bindings:
             self.assertIn(binding, panel, f"untrusted QML binding lacks PlainText: {binding}")
+
+    def test_key_editor_reads_and_saves_the_selected_page(self):
+        panel = self.PANEL.read_text()
+        self.assertIn("model: root.pageKeys(root.selectedPage).slice(0, root.deckKeys)", panel)
+        self.assertIn('"--page", String(root.selectedPage + 1)', panel)
+        self.assertIn("(root.pageKeys(root.selectedPage)[root.selectedIndex] || {}).action", panel)
+
+    def test_pages_can_be_added_and_removed_from_the_editor(self):
+        panel = self.PANEL.read_text()
+        self.assertIn('[root.helper, "add-page"]', panel)
+        self.assertIn('[root.helper, "remove-page", String(root.selectedPage + 1)]', panel)
 
 
 if __name__ == "__main__":

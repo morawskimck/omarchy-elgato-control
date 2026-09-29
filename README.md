@@ -8,6 +8,7 @@ Current version: **0.3.1**
 ## Supported hardware
 
 - Stream Deck Plus (`0fd9:0084`): eight keys, four dials, 120×120 JPEG artwork, device brightness, and an 800×100 live dial LCD
+- Stream Deck Neo (`0fd9:009a`): eight keys (4×2) with 96×96 artwork rotated 180°, two touch sensors that flip between key pages, a 248×58 info screen showing the clock, page, microphone mute, and Key Light state, and device brightness
 - Stream Deck Pedal (`0fd9:0086`): three pedal events
 - Elgato Key Light Neo: automatic mDNS discovery, grouped power, brightness, temperature, and live status
 - Wave:3: automatic PipeWire detection; microphone actions target the detected Wave source rather than an unrelated default microphone
@@ -106,6 +107,11 @@ that one control in the action inspector.
 - A 2×4 Stream Deck preview selects individual keys.
 - The LCD strip and four dial controls are represented visually.
 - Each Plus dial exposes left, press, and right actions only when selected.
+- Page tabs above the key grid switch between key pages; **+** adds a page
+  and **×** removes the selected one. A dot marks the page the panel is
+  showing. On a Stream Deck Neo the left and right touch sensors flip to the
+  previous and next page, wrapping around; any key, dial, or pedal can do the
+  same with the Previous Page and Next Page functions.
 - A three-part Pedal preview selects the left, middle, or right pedal.
 - Installed desktop applications are discovered from standard `.desktop` files.
 - Built-in functions include audio, media, workspaces, screenshots, OmaMeet,
@@ -127,6 +133,16 @@ bin/elgato-control init
 bin/elgato-control profile
 bin/elgato-control status --json
 bin/elgato-control daemon
+bin/elgato-control set-key 3 lock --page 2
+bin/elgato-control add-page
+bin/elgato-control remove-page 2
+```
+
+Page 1 is the profile's `keys` list; further pages live in `pages`, each with
+its own `keys`, so a single-page profile is unchanged:
+
+```json
+{"keys": [...], "pages": [{"keys": [...]}]}
 ```
 
 ## Automatic device discovery

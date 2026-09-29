@@ -18,13 +18,19 @@ Panel {
   property string error: ""
   readonly property bool connected: status.plus != null || status.deck != null || status.pedal != null
   readonly property bool hasPlus: status.plus != null
-  // Either a Stream Deck + or the panel in the deck slot drives the key grid.
+  // Either a Stream Deck + or the panel in the deck slot (the Stream Deck Neo) drives the key grid.
   readonly property var deck: status.plus != null ? status.plus : status.deck
   readonly property bool hasDeck: deck != null
   readonly property bool hasDials: (profile.dials || []).length > 0 && hasPlus
   readonly property int deckColumns: hasDeck && deck.columns ? deck.columns : 4
   readonly property int deckKeys: hasDeck && deck.keys ? deck.keys : (profile.keys || []).length
   readonly property bool hasPedal: status.pedal != null
+  // Page 1 is the profile's `keys` list; `pages` holds any further pages.
+  property int selectedPage: 0
+  readonly property int pageCount: 1 + (profile.pages || []).length
+  readonly property int livePage: status.page || 0
+  readonly property bool hasScreen: hasDeck && (deck.capabilities || []).indexOf("screen") >= 0
+  onPageCountChanged: if (selectedPage >= pageCount) selectedPage = pageCount - 1
   readonly property bool hasWave: status.wave !== null && status.wave !== undefined
   readonly property bool hasLights: (status.lights || []).some(function(x) { return x.reachable })
   readonly property string helper: Qt.resolvedUrl("bin/elgato-control").toString().replace("file://", "")
@@ -44,6 +50,19 @@ Panel {
   ].filter(function(x) { return x !== null })
 
   function selectControl(type, index) { selectedControl = type; selectedIndex = index }
+  function pageKeys(page) { return page === 0 ? (profile.keys || []) : (((profile.pages || [])[page - 1] || {}).keys || []) }
+  function addPage() {
+    if (pageProc.running) return
+    pageProc.command = [root.helper, "add-page"]
+    root.selectedPage = root.pageCount
+    pageProc.running = true
+  }
+  function removePage() {
+    if (pageProc.running || root.pageCount <= 1) return
+    pageProc.command = [root.helper, "remove-page", String(root.selectedPage + 1)]
+    root.selectedPage = Math.max(0, root.selectedPage - 1)
+    pageProc.running = true
+  }
   function actionName(value) {
     for (var i = 0; i < actionOptions.length; i++) if (actionOptions[i].value === value) return actionOptions[i].label.replace(/^(Function|Application|Key) · /, "")
     return value || "Unassigned"
@@ -53,7 +72,7 @@ Panel {
     return ""
   }
   function saveAction(slot, action) {
-    if (selectedDevice === "streamdeck" && selectedControl === "key") saveProc.command = [helper, "set-key", String(selectedIndex + 1), action]
+    if (selectedDevice === "streamdeck" && selectedControl === "key") saveProc.command = [helper, "set-key", String(selectedIndex + 1), action, "--page", String(root.selectedPage + 1)]
     else if (selectedDevice === "streamdeck" && selectedControl === "dial") saveProc.command = [helper, "set-dial", String(selectedIndex + 1), slot, action]
     else if (selectedDevice === "pedal") saveProc.command = [helper, "set-pedal", String(selectedIndex + 1), action]
     else return
@@ -128,6 +147,7 @@ Panel {
     }
   }
   Process { id: saveProc; onExited: function() { root.refresh() } }
+  Process { id: pageProc; onExited: function() { root.refresh() } }
   Process { id: waveProc; onExited: function() { root.refresh() } }
   Process {
     id: lightProc
@@ -202,12 +222,40 @@ Panel {
               id: deckColumn
               visible: root.selectedDevice === "streamdeck"; anchors.centerIn: parent; width: parent.width - Style.space(28); spacing: Style.space(10)
               Text { anchors.horizontalCenter: parent.horizontalCenter; text: (root.hasDeck && root.deck.label ? root.deck.label : "Stream Deck").toUpperCase(); color: Color.muted; font.family: Style.font.family; font.pixelSize: 10; font.bold: true }
+              Row {
+                anchors.horizontalCenter: parent.horizontalCenter; spacing: Style.space(6)
+                Text { anchors.verticalCenter: parent.verticalCenter; text: "PAGE"; color: Color.muted; font.family: Style.font.family; font.pixelSize: 9; font.bold: true }
+                Repeater { model: root.pageCount
+                  Rectangle {
+                    required property int index
+                    width: Style.space(26); height: Style.space(22); radius: 0
+                    color: root.selectedPage === index ? root.controlFaceRaised : root.controlFace
+                    border.width: root.selectedPage === index ? 2 : 1
+                    border.color: root.selectedPage === index ? Color.accent : root.controlBorder
+                    Text { anchors.centerIn: parent; text: index + 1; color: Color.foreground; font.family: Style.font.family; font.pixelSize: 10; font.bold: true }
+                    // Marks the page the panel is showing right now.
+                    Rectangle { visible: root.livePage === index && root.pageCount > 1; anchors.top: parent.top; anchors.right: parent.right; anchors.margins: Style.space(3); width: Style.space(4); height: width; radius: width / 2; color: Color.accent }
+                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.selectedPage = index }
+                  }
+                }
+                Rectangle {
+                  width: Style.space(26); height: Style.space(22); radius: 0; color: addPageArea.containsMouse ? root.controlFaceRaised : root.controlFace; border.color: root.controlBorder
+                  Text { anchors.centerIn: parent; text: "+"; color: Color.foreground; font.family: Style.font.family; font.pixelSize: 13 }
+                  MouseArea { id: addPageArea; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.addPage() }
+                }
+                Rectangle {
+                  visible: root.pageCount > 1
+                  width: Style.space(26); height: Style.space(22); radius: 0; color: removePageArea.containsMouse ? root.controlFaceRaised : root.controlFace; border.color: root.controlBorder
+                  Text { anchors.centerIn: parent; text: "×"; color: Color.foreground; font.family: Style.font.family; font.pixelSize: 13 }
+                  MouseArea { id: removePageArea; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.removePage() }
+                }
+              }
               Grid {
                 id: keyGrid
                 width: parent.width; columns: root.deckColumns; columnSpacing: Style.space(8); rowSpacing: Style.space(8)
                 readonly property real cell: (width - Style.space(8) * (root.deckColumns - 1)) / root.deckColumns
                 Repeater {
-                  model: (root.profile.keys || []).slice(0, root.deckKeys)
+                  model: root.pageKeys(root.selectedPage).slice(0, root.deckKeys)
                   Rectangle {
                     width: keyGrid.cell; height: width; radius: 0
                     clip: true
@@ -220,6 +268,23 @@ Panel {
                       Text { width: parent.width; horizontalAlignment: Text.AlignHCenter; elide: Text.ElideRight; text: root.actionName(modelData.action); textFormat: Text.PlainText; color: Color.foreground; font.family: Style.font.family; font.pixelSize: 9 }
                     }
                     MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.selectControl("key", index) }
+                  }
+                }
+              }
+              Row {
+                visible: root.hasScreen
+                width: parent.width; spacing: Style.space(8)
+                Repeater { model: 3
+                  Rectangle {
+                    required property int index
+                    width: index === 1 ? parent.width - 2 * keyGrid.cell - Style.space(16) : keyGrid.cell
+                    height: Style.space(34); radius: 0
+                    color: index === 1 ? "#000000" : root.controlFace; border.color: root.controlBorder
+                    Text {
+                      anchors.centerIn: parent; color: index === 1 ? Color.foreground : Color.muted; font.family: Style.font.family; font.pixelSize: 9; font.bold: true
+                      text: index === 1 ? "CLOCK · STATUS" + (root.pageCount > 1 ? " · PAGE " + (root.livePage + 1) + "/" + root.pageCount : "")
+                                        : (index === 0 ? "◀ PAGE" : "PAGE ▶")
+                    }
                   }
                 }
               }
@@ -320,14 +385,14 @@ Panel {
             width: parent.width * 0.39 - Style.space(14); spacing: Style.space(10)
             Text { text: "ACTION INSPECTOR"; color: Color.muted; font.family: Style.font.family; font.pixelSize: 10; font.bold: true }
             Text {
-              text: root.selectedDevice === "streamdeck" ? (root.selectedControl === "key" ? "Key " + (root.selectedIndex + 1) : "Dial " + (root.selectedIndex + 1)) : root.selectedDevice === "pedal" ? ["Left pedal", "Middle pedal", "Right pedal"][root.selectedIndex] : root.selectedDevice === "wave" ? "Wave:3" : root.selectedLightName(); textFormat: Text.PlainText
+              text: root.selectedDevice === "streamdeck" ? (root.selectedControl === "key" ? "Key " + (root.selectedIndex + 1) + (root.pageCount > 1 ? " · Page " + (root.selectedPage + 1) : "") : "Dial " + (root.selectedIndex + 1)) : root.selectedDevice === "pedal" ? ["Left pedal", "Middle pedal", "Right pedal"][root.selectedIndex] : root.selectedDevice === "wave" ? "Wave:3" : root.selectedLightName(); textFormat: Text.PlainText
               color: Color.foreground; font.family: Style.font.family; font.pixelSize: 15; font.bold: true
             }
             Text { visible: root.selectedDevice === "streamdeck" || root.selectedDevice === "pedal"; width: parent.width; wrapMode: Text.WordWrap; text: "Choose an application, system function, or key. Changes apply immediately."; color: Color.muted; font.family: Style.font.family; font.pixelSize: 10 }
             SearchableDropdown {
               visible: (root.selectedDevice === "streamdeck" && root.selectedControl === "key") || root.selectedDevice === "pedal"
               width: parent.width; label: "On press"; options: root.actionOptions
-              value: root.selectedDevice === "pedal" ? ((root.profile.pedals[root.selectedIndex] || {}).action || "") : ((root.profile.keys[root.selectedIndex] || {}).action || "")
+              value: root.selectedDevice === "pedal" ? ((root.profile.pedals[root.selectedIndex] || {}).action || "") : ((root.pageKeys(root.selectedPage)[root.selectedIndex] || {}).action || "")
               onChanged: function(action) { root.saveAction("action", action) }
             }
             Column {

@@ -4,12 +4,19 @@ import argparse, ctypes, hashlib, ipaddress, json, os, pathlib, re, shutil, sign
 
 VID = 0x0FD9
 PLUS, PEDAL = 0x0084, 0x0086
+NEO = 0x009A
 # keys/columns/keySize/flip describe the key grid; flip marks panels whose
 # firmware expects key artwork rotated 180 degrees (gen-2 non-Plus hardware).
 DEVICE_SPECS = {
     PLUS: {"kind": "streamdeck", "label": "Stream Deck +", "slot": "plus",
            "capabilities": ["keys", "dials", "dialPress", "lcd", "touch", "brightness"],
            "keys": 8, "columns": 4, "keySize": 120, "flip": False},
+    # Eight keys, then two touch sensors reported as keys 8 and 9 that flip
+    # pages, and a 248x58 info screen between them. Keys and screen take
+    # artwork rotated 180 degrees.
+    NEO: {"kind": "streamdeck", "label": "Stream Deck Neo", "slot": "deck",
+          "capabilities": ["keys", "brightness", "pages", "screen"],
+          "keys": 8, "columns": 4, "keySize": 96, "flip": True, "touchKeys": 2},
     PEDAL: {"kind": "pedal", "label": "Stream Deck Pedal", "slot": "pedal",
             "capabilities": ["pedals"]},
 }
@@ -44,7 +51,9 @@ BUILTIN_ACTIONS = [
     ("wave_headphone_up", "Wave Headphones Up"), ("wave_headphone_mute", "Wave Headphones Mute"),
     ("wave_preset_quiet", "Wave Preset · Quiet Room"), ("wave_preset_normal", "Wave Preset · Normal"),
     ("wave_preset_loud", "Wave Preset · Loud Environment"),
+    ("page_prev", "Previous Page"), ("page_next", "Next Page"),
 ]
+TOUCH_COLOR = [180, 180, 180]
 
 def plain_text(value, fallback=""):
     """Keep device- and network-controlled labels out of QML AutoText."""
@@ -367,13 +376,46 @@ def rendered_key_image(action, label, color, size=120, flip=False):
         ["renderer-v6-truecolor", action, label, source, source_stamp, size, flip],
         lambda output: command + JPEG_OUTPUT + ["-quality", "92", str(output)])
 
+def blank_key(index):
+    return {"label": str(index + 1), "action": "", "color": [40, 90, 130]}
+
+def page_count(profile):
+    return 1 + len(profile.get("pages") or [])
+
+def page_keys(profile, page):
+    """The keys of a page. Page 0 is the profile's `keys` list, so a profile
+    without extra pages reads and saves exactly as before."""
+    if page == 0: return profile.setdefault("keys", [])
+    pages = profile.get("pages") or []
+    if not 0 < page <= len(pages): raise ValueError("Page is out of range")
+    return pages[page - 1].setdefault("keys", [])
+
 def ensure_key_slots(profile, count):
-    """Grow the profile so every physical key on the attached panel is editable."""
-    keys = profile.setdefault("keys", [])
-    if len(keys) >= count: return False
-    for index in range(len(keys), count):
-        keys.append({"label": str(index + 1), "action": "", "color": [40, 90, 130]})
-    return True
+    """Grow every page so each physical key on the attached panel is editable."""
+    grown = False
+    for page in range(page_count(profile)):
+        keys = page_keys(profile, page)
+        for index in range(len(keys), count):
+            keys.append(blank_key(index)); grown = True
+    return grown
+
+def add_page():
+    profile = load_profile()
+    size = max(len(page_keys(profile, page)) for page in range(page_count(profile))) or 8
+    profile.setdefault("pages", []).append({"keys": [blank_key(index) for index in range(size)]})
+    save_profile(profile)
+    return page_count(profile)
+
+def remove_page(index):
+    profile = load_profile()
+    count = page_count(profile)
+    if count <= 1: raise ValueError("The only page cannot be removed")
+    if not 0 <= index < count: raise ValueError("Page is out of range")
+    pages = profile["pages"]
+    if index == 0: profile["keys"] = pages.pop(0).get("keys", [])
+    else: pages.pop(index - 1)
+    if not pages: profile.pop("pages")
+    save_profile(profile)
 
 def desktop_file_exists(desktop_id):
     if not re.fullmatch(r"[A-Za-z0-9_.+-]+", desktop_id): return False
@@ -384,10 +426,10 @@ def valid_action(action):
     if action in KEY_ACTIONS or any(action == item[0] for item in BUILTIN_ACTIONS): return True
     return action.startswith("app:") and desktop_file_exists(action[4:])
 
-def set_control_action(kind, index, slot, action):
+def set_control_action(kind, index, slot, action, page=0):
     if not valid_action(action): raise ValueError("Unsupported action: " + action)
     profile = load_profile()
-    controls = profile.get(kind, [])
+    controls = page_keys(profile, page) if kind == "keys" else profile.get(kind, [])
     if index < 0 or index >= len(controls): raise ValueError("Control index is out of range")
     allowed = {"keys": ("action",), "pedals": ("action",), "dials": ("left", "press", "right")}
     if kind not in allowed or slot not in allowed[kind]: raise ValueError("Invalid control slot")
@@ -430,6 +472,14 @@ def command_for(action, wave=None):
       "omameet": ["omarchy-shell", "shell", "toggle", "acp.omameet"], "workspace_next": ["hyprctl", "dispatch", "workspace", "+1"],
       "workspace_prev": ["hyprctl", "dispatch", "workspace", "-1"], "overview": ["hyprctl", "dispatch", "hyprexpo:expo", "toggle"]
     }.get(action)
+
+def mic_muted(wave=None):
+    """Whether the microphone the mic actions target is muted, in PipeWire or on the Wave itself."""
+    if wave and wave.get("muted"): return True
+    target = str((wave or {}).get("sourceId") or "@DEFAULT_AUDIO_SOURCE@")
+    try: output = subprocess.run(["wpctl", "get-volume", target], capture_output=True, text=True, timeout=1).stdout
+    except (OSError, subprocess.SubprocessError): return False
+    return "[MUTED]" in output
 
 def release_command_for(action):
     if action == "voxtype_push_to_talk": return ["voxtype", "record", "stop"]
@@ -536,6 +586,41 @@ def lcd_svg(profile, brightness, light_states):
         cells.append('<text x="%d" y="72" fill="#94a3b8" font-size="16" font-family="sans-serif">%s</text>' % (x + 82, values[i]))
     return '<svg xmlns="http://www.w3.org/2000/svg" width="800" height="100"><rect width="800" height="100" fill="#090b10"/>%s</svg>' % "".join(cells)
 
+def render_svg_jpeg(svg, rotate=False):
+    """Render a window image (Plus LCD strip, Neo info screen) as panel-ready JPEG."""
+    converter = shutil.which("magick") or shutil.which("convert")
+    if not converter: raise RuntimeError("Window rendering requires ImageMagick")
+    with tempfile.TemporaryDirectory(prefix="elgato-control-lcd-") as directory:
+        source = pathlib.Path(directory) / "window.svg"
+        output = pathlib.Path(directory) / "window.jpg"
+        source.write_text(svg)
+        subprocess.run([converter, str(source)] + (["-rotate", "180"] if rotate else []) + JPEG_OUTPUT
+                       + ["-quality", "90", str(output)], check=True,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+        return output.read_bytes()
+
+def svg_text(x, y, value, size, color, weight="normal", anchor="start"):
+    value = str(value).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    return ('<text x="%d" y="%d" fill="%s" font-size="%d" font-family="sans-serif" font-weight="%s" '
+            'text-anchor="%s">%s</text>' % (x, y, color, size, weight, anchor, value))
+
+def neo_screen_svg(now, page, pages, mic_muted, lights):
+    """The Stream Deck Neo info screen: clock and date, then page and status lines."""
+    parts = [svg_text(8, 33, time.strftime("%H:%M", now), 28, "#f8fafc", "bold"),
+             svg_text(9, 51, time.strftime("%a %d %b", now), 12, "#94a3b8")]
+    status = []
+    if pages > 1: status.append(("PAGE %d/%d" % (page + 1, pages), "#f8fafc"))
+    if mic_muted: status.append(("MIC MUTED", "#f87171"))
+    reachable = [light for light in lights if light.get("reachable")]
+    if reachable:
+        lit = [light for light in reachable if light.get("on")]
+        status.append(("LIGHT %s%%" % lit[0].get("brightness", "--") if lit else "LIGHT OFF",
+                       "#fbbf24" if lit else "#64748b"))
+    for line, (value, color) in enumerate(status[:3]):
+        parts.append(svg_text(240, 18 + line * 16, value, 12, color, "bold", "end"))
+    return ('<svg xmlns="http://www.w3.org/2000/svg" width="248" height="58">'
+            '<rect width="248" height="58" fill="#000000"/>%s</svg>' % "".join(parts))
+
 class Daemon:
     def __init__(self):
         self.hid, self.devices, self.previous = Hid(), {}, {}
@@ -545,8 +630,10 @@ class Daemon:
         self.discovered_lights = []
         self.last_light_discovery = 0
         self.lcd_signature = None
+        self.page = 0
         self.running = True
         self.status = {"running": True, "profile": self.profile.get("name", "Default"), "plus": None, "deck": None, "pedal": None,
+                       "page": 0, "pages": page_count(self.profile),
                        "wave": None, "lights": [], "devices": [], "recentReports": {},
                        "lastAction": "", "lastEvent": "", "error": "", "updatedAt": int(time.time())}
 
@@ -569,39 +656,67 @@ class Daemon:
         # not keep artwork from a previous session; a redraw does not need it.
         if reset and "lcd" not in capabilities: self.hid.feature(dev, [0x03, 0x02])
         self.hid.feature(dev, [0x03, 0x08, max(0, min(100, self.brightness))])
-        for i, key in enumerate(self.profile.get("keys", [])[:spec.get("keys", 8)]):
+        for i, key in enumerate(page_keys(self.profile, self.page)[:spec.get("keys", 8)]):
             if "touch" in capabilities:
                 color = key.get("color", [40, 90, 130])
                 self.hid.feature(dev, [0x03, 0x06, i] + [int(x) & 255 for x in color[:3]])
             self.key_image(dev, i, key, spec)
+        if "pages" in capabilities:
+            # The touch sensors flip pages, so they light only when there is another page.
+            color = TOUCH_COLOR if page_count(self.profile) > 1 else [0, 0, 0]
+            for sensor in range(spec.get("touchKeys", 0)):
+                self.hid.feature(dev, [0x03, 0x06, spec["keys"] + sensor] + color)
         if "lcd" in capabilities: self.update_lcd(dev, force=True)
+        if "screen" in capabilities: self.update_screen(device, force=True)
+
+    def redraw_decks(self):
+        for device in self.devices.values():
+            if device["kind"] == "streamdeck": self.decorate(device)
+
+    def clamp_page(self):
+        self.page = max(0, min(self.page, page_count(self.profile) - 1))
+
+    def flip_page(self, delta):
+        count = page_count(self.profile)
+        if count <= 1: return
+        self.page = (self.page + delta) % count
+        self.status.update(page=self.page, pages=count)
+        self.redraw_decks()
+
+    def write_window(self, dev, data):
+        """Upload a full-window JPEG in 1016-byte pages (report 0x02, command 0x0B)."""
+        page = 0
+        for offset in range(0, len(data), 1016):
+            payload = data[offset:offset + 1016]
+            final = offset + len(payload) >= len(data)
+            header = [0x02, 0x0B, 0, 1 if final else 0, len(payload) & 255,
+                      len(payload) >> 8, page & 255, page >> 8]
+            self.hid.write(dev, header + list(payload) + [0] * (1016 - len(payload)))
+            page += 1
+
+    def update_screen(self, device, force=False):
+        now = time.localtime()
+        pages = page_count(self.profile)
+        lights = [{key: light.get(key) for key in ("reachable", "on", "brightness")} for light in self.light_states]
+        muted = bool(self.status.get("micMuted"))
+        signature = json.dumps([time.strftime("%Y%m%d%H%M", now), self.page, pages, muted, lights])
+        if not force and signature == device.get("screenSignature"): return
+        try:
+            data = render_svg_jpeg(neo_screen_svg(now, self.page, pages, muted, lights),
+                                   rotate=device_spec(device["productId"]).get("flip", False))
+            self.write_window(device["handle"], data)
+            device["screenSignature"] = signature
+        except (OSError, RuntimeError, subprocess.SubprocessError) as e:
+            self.status["error"] = "Screen: " + str(e)
 
     def update_lcd(self, dev, force=False):
         signature = json.dumps({"dials": self.profile.get("dials", []), "lights": self.light_states,
                                 "brightness": self.brightness}, sort_keys=True, default=str)
         if not force and signature == self.lcd_signature: return
-        converter = shutil.which("magick") or shutil.which("convert")
-        if not converter:
-            self.status["error"] = "LCD rendering requires ImageMagick"
-            return
         try:
-            with tempfile.TemporaryDirectory(prefix="elgato-control-lcd-") as directory:
-                svg = pathlib.Path(directory) / "lcd.svg"
-                jpg = pathlib.Path(directory) / "lcd.jpg"
-                svg.write_text(lcd_svg(self.profile, self.brightness, self.light_states))
-                subprocess.run([converter, str(svg), "-quality", "90", str(jpg)], check=True,
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
-                data = jpg.read_bytes()
-            page = 0
-            for offset in range(0, len(data), 1016):
-                payload = data[offset:offset + 1016]
-                final = offset + len(payload) >= len(data)
-                header = [0x02, 0x0B, 0, 1 if final else 0, len(payload) & 255,
-                          len(payload) >> 8, page & 255, page >> 8]
-                self.hid.write(dev, header + list(payload) + [0] * (1016 - len(payload)))
-                page += 1
+            self.write_window(dev, render_svg_jpeg(lcd_svg(self.profile, self.brightness, self.light_states)))
             self.lcd_signature = signature
-        except (OSError, subprocess.SubprocessError) as e:
+        except (OSError, RuntimeError, subprocess.SubprocessError) as e:
             self.status["error"] = "LCD: " + str(e)
 
     def connect(self):
@@ -611,6 +726,7 @@ class Daemon:
             if path not in live:
                 self.hid.lib.hid_close(self.devices.pop(path)["handle"])
                 self.previous.pop("keys:" + path, None)
+                self.previous.pop("touch:" + path, None)
         for info in found:
             if info["path"] not in self.devices:
                 handle = self.hid.open(info["path"])
@@ -660,6 +776,8 @@ class Daemon:
             except (OSError, RuntimeError, subprocess.SubprocessError) as e: self.status["error"] = "Wave: " + str(e)
         elif action.startswith("lights_"):
             self.act_lights(action)
+        elif action in ("page_next", "page_prev"):
+            self.flip_page(1 if action == "page_next" else -1)
         elif action.startswith("brightness_"):
             self.brightness = 55 if action == "brightness_reset" else max(0, min(100, self.brightness + (5 if action == "brightness_up" else -5)))
             for d in self.devices.values():
@@ -718,12 +836,20 @@ class Daemon:
         cache = "keys:" + device["path"]
         if len(data) < 5 or data[0] != 1: return
         if data[1] == 0:
+            keys = page_keys(self.profile, self.page)
             states = list(data[4:4 + count]); old = list(self.previous.get(cache, []))
             if len(states) < count: states += [0] * (count - len(states))
             if len(old) < count: old += [0] * (count - len(old))
             for i, state in enumerate(states):
-                if state and not old[i] and i < len(self.profile.get("keys", [])): self.act(self.profile["keys"][i].get("action"))
+                if state and not old[i] and i < len(keys): self.act(keys[i].get("action"))
             self.previous[cache] = states
+            if "pages" in spec.get("capabilities", []):
+                sensors = spec.get("touchKeys", 0)
+                touch = list(data[4 + count:4 + count + sensors]); touch += [0] * (sensors - len(touch))
+                old_touch = self.previous.get("touch:" + device["path"], [0] * sensors)
+                self.previous["touch:" + device["path"]] = touch
+                for i, state in enumerate(touch):
+                    if state and not old_touch[i]: self.flip_page(-1 if i == 0 else 1)
         elif "dials" in spec.get("capabilities", []) and data[1] == 3 and len(data) >= 9:
             kind = data[4]
             if kind == 0:
@@ -751,8 +877,11 @@ class Daemon:
             elif not state and old[i]: self.release(action)
         self.previous["pedals"] = states
 
+    def screen_devices(self):
+        return [d for d in self.devices.values() if "screen" in device_spec(d["productId"]).get("capabilities", [])]
+
     def loop(self):
-        last_connect = last_status = last_lights = 0
+        last_connect = last_status = last_lights = last_screen = 0
         while self.running:
             now = time.monotonic()
             if now - last_connect > 2: self.connect(); last_connect = now
@@ -762,16 +891,23 @@ class Daemon:
                 if mtime != self.mtime:
                     self.profile, self.mtime = load_profile(), mtime
                     self.lcd_signature = None
+                    self.clamp_page()
                     for device in self.devices.values():
                         if device["kind"] == "streamdeck": self.decorate(device)
             except (OSError, ValueError, json.JSONDecodeError) as e: self.status["error"] = "Profile: " + str(e)
+            if now - last_screen > 1:
+                screens = self.screen_devices()
+                if screens: self.status["micMuted"] = mic_muted(self.status.get("wave"))
+                for device in screens: self.update_screen(device)
+                last_screen = now
             for d in list(self.devices.values()):
                 data = self.hid.read(d["handle"])
                 if data:
                     self.status["recentReports"][d["kind"]] = {"hex": data.hex(), "length": len(data), "at": int(time.time())}
                     self.parse_deck(data, d) if d["kind"] == "streamdeck" else self.parse_pedal(data)
             if now - last_status > .5:
-                self.status.update(running=True, brightness=self.brightness, profile=self.profile.get("name", "Default"), updatedAt=int(time.time()))
+                self.status.update(running=True, brightness=self.brightness, profile=self.profile.get("name", "Default"),
+                                   page=self.page, pages=page_count(self.profile), updatedAt=int(time.time()))
                 write_status(self.status); last_status = now
             time.sleep(.025)
         for d in self.devices.values(): self.hid.lib.hid_close(d["handle"])
@@ -781,7 +917,8 @@ def main():
     p = argparse.ArgumentParser(); sub = p.add_subparsers(dest="command", required=True)
     sub.add_parser("daemon"); sub.add_parser("init"); sub.add_parser("profile"); sub.add_parser("catalog")
     pedal = sub.add_parser("set-pedal"); pedal.add_argument("index", type=int, choices=(1, 2, 3)); pedal.add_argument("action")
-    key = sub.add_parser("set-key"); key.add_argument("index", type=int, choices=range(1, 9)); key.add_argument("action")
+    key = sub.add_parser("set-key"); key.add_argument("index", type=int, choices=range(1, 9)); key.add_argument("action"); key.add_argument("--page", type=int, default=1)
+    sub.add_parser("add-page"); remove = sub.add_parser("remove-page"); remove.add_argument("page", type=int)
     dial = sub.add_parser("set-dial"); dial.add_argument("index", type=int, choices=range(1, 5)); dial.add_argument("slot", choices=("left", "press", "right")); dial.add_argument("action")
     wave = sub.add_parser("wave"); wave.add_argument("action", choices=("gain-up", "gain-down", "mute", "headphone-up", "headphone-down", "headphone-mute", "preset-quiet", "preset-normal", "preset-loud", "default"))
     lights = sub.add_parser("lights"); lights.add_argument("action", choices=("on", "off", "toggle", "brightness", "temperature", "refresh")); lights.add_argument("--target", default="all"); lights.add_argument("--value", type=int)
@@ -795,7 +932,12 @@ def main():
         except ValueError as error: p.error(str(error))
         print(PROFILE); return
     if args.command == "set-key":
-        try: set_control_action("keys", args.index - 1, "action", args.action)
+        try: set_control_action("keys", args.index - 1, "action", args.action, page=args.page - 1)
+        except ValueError as error: p.error(str(error))
+        print(PROFILE); return
+    if args.command == "add-page": print(add_page()); return
+    if args.command == "remove-page":
+        try: remove_page(args.page - 1)
         except ValueError as error: p.error(str(error))
         print(PROFILE); return
     if args.command == "set-dial":
