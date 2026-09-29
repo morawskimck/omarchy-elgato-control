@@ -45,6 +45,9 @@ class DeviceModelTests(unittest.TestCase):
     def test_media_action_uses_native_omarchy_service(self):
         self.assertEqual(["omarchy-shell", "media", "playPause"], module.command_for("media_play_pause"))
 
+    def test_terminal_action_uses_the_default_terminal(self):
+        self.assertEqual(["uwsm-app", "--", "xdg-terminal-exec"], module.command_for("terminal"))
+
     def test_home_key_action_uses_wtype_without_a_shell(self):
         self.assertEqual(["wtype", "-k", "Home"], module.command_for("key_home"))
 
