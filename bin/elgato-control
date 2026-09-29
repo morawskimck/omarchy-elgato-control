@@ -477,8 +477,14 @@ def resolve_icon(icon):
     return str(sorted(candidates,
                       key=lambda entry: (score(entry), entry[0], entry[1], str(entry[2])))[0][2])
 
+# Functions that share another function's bundled artwork.
+ARTWORK_ALIASES = {"wave_mute": "mic_mute"}
+
+def builtin_artwork(action):
+    return ICONS / (ARTWORK_ALIASES.get(action, action) + ".jpg")
+
 def action_icon(action):
-    built_in = ICONS / (action + ".jpg")
+    built_in = builtin_artwork(action)
     if built_in.is_file(): return str(built_in)
     if action.startswith("app:"):
         return resolve_icon(desktop_entry(action[4:]).get("Icon", ""))
@@ -514,7 +520,7 @@ def cached_render(parts, build):
 
 def rendered_key_image(action, label, color, size=120, flip=False):
     """Render key artwork at the panel's native size, rotated when the firmware expects it."""
-    existing = ICONS / (action + ".jpg")
+    existing = builtin_artwork(action)
     converter = shutil.which("magick") or shutil.which("convert")
     if existing.is_file():
         # Bundled artwork is authored at the Plus's size and orientation.
