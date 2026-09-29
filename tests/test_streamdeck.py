@@ -583,6 +583,48 @@ class UsbKeyLightTests(unittest.TestCase):
             daemon.act_lights("lights_toggle")
         request.assert_called_once_with(usb, {"on": 1})
 
+    def test_group_brightness_steps_each_light_from_its_own_level(self):
+        daemon = module.Daemon.__new__(module.Daemon)
+        daemon.status = {}
+        usb = {"transport": "usb", "path": "/dev/hidraw11", "reachable": True, "brightness": 60, "maxBrightness": 60}
+        wifi = {"host": "desk.local", "reachable": True, "brightness": 60}
+        daemon.light_states = [usb, wifi]
+        daemon.refresh_lights = lambda: None
+        with mock.patch.object(module, "light_request") as request:
+            daemon.act_lights("lights_brightness_up")
+        self.assertEqual([mock.call(usb, {"brightness": 60, "on": 1}), mock.call(wifi, {"brightness": 65, "on": 1})],
+                         request.call_args_list)
+
+    def test_group_temperature_steps_each_light_from_its_own_level(self):
+        daemon = module.Daemon.__new__(module.Daemon)
+        daemon.status = {}
+        left = {"host": "left.local", "reachable": True, "temperature": 340}
+        right = {"host": "right.local", "reachable": True, "temperature": 200}
+        daemon.light_states = [left, right]
+        daemon.refresh_lights = lambda: None
+        with mock.patch.object(module, "light_request") as request:
+            daemon.act_lights("lights_warmer")
+        self.assertEqual([mock.call(left, {"temperature": 344, "on": 1}), mock.call(right, {"temperature": 210, "on": 1})],
+                         request.call_args_list)
+
+    def test_unavailable_accessory_info_falls_back_to_full_brightness(self):
+        light = {"transport": "usb", "path": "/dev/hidraw11", "serial": "A"}
+        replies = [RuntimeError("Key Light: Request not support"),
+                   '{"numberOfLights":1,"lights":[{"on":1,"brightness":80,"temperature":238}]}']
+        with mock.patch.object(module, "validate_usb_light", side_effect=lambda path: path), \
+             mock.patch.object(module, "USB_LIGHT_INFO", {}), \
+             mock.patch.object(module, "usb_light_exchange", side_effect=replies):
+            self.assertEqual(100, module.light_request(light)["maxBrightness"])
+
+    def test_missing_brightness_ceiling_falls_back_to_full_brightness(self):
+        light = {"transport": "usb", "path": "/dev/hidraw11", "serial": "A"}
+        replies = ['{"power-info":{"maximumBrightness":null}}',
+                   '{"numberOfLights":1,"lights":[{"on":1,"brightness":80,"temperature":238}]}']
+        with mock.patch.object(module, "validate_usb_light", side_effect=lambda path: path), \
+             mock.patch.object(module, "USB_LIGHT_INFO", {}), \
+             mock.patch.object(module, "usb_light_exchange", side_effect=replies):
+            self.assertEqual(100, module.light_request(light)["maxBrightness"])
+
     def test_empty_network_discovery_is_not_repeated_every_poll(self):
         daemon = module.Daemon.__new__(module.Daemon)
         daemon.profile, daemon.status, daemon.devices = {}, {}, {}
@@ -676,6 +718,8 @@ class QmlPlainTextTests(unittest.TestCase):
         timer = next(x for x in panel.splitlines() if x.strip().startswith("Timer {") and "refresh" in x)
         self.assertNotIn("running: root.opened", timer)
 
+    def test_group_brightness_slider_reaches_the_highest_light_limit(self):
+        self.assertIn("Math.max.apply(null, limits)", self.PANEL.read_text())
 
     def test_brightness_slider_stops_at_the_light_limit(self):
         panel = self.PANEL.read_text()

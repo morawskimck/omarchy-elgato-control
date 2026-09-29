@@ -208,12 +208,14 @@ def read_usb_light_response(read_report):
         raise RuntimeError("Key Light: " + plain_text(message))
     return text
 
-def usb_light_exchange(path, text, timeout=1.5, lock_timeout=5.0):
+def usb_light_exchange(path, text, timeout=0.5, lock_timeout=2.0):
     """Send one request to a USB light and return the response body.
 
     hidraw hands every open descriptor a copy of every input report, so the
     daemon and the panel's CLI take turns with flock and drop stale reports
-    before writing. A request takes 5-60 ms.
+    before writing. A request takes 5-60 ms; the daemon makes these calls
+    from its HID loop, so the timeouts bound how long a stuck light can
+    delay key presses.
     """
     frames = usb_light_frames(text)
     fd = os.open(path, os.O_RDWR | os.O_NONBLOCK)
@@ -243,9 +245,13 @@ def usb_light_limit(light, path):
     key = (path, light.get("serial", ""))
     cached = USB_LIGHT_INFO.get(key)
     if not cached or time.monotonic() - cached[0] > USB_LIGHT_INFO_TTL:
-        info = json.loads(usb_light_exchange(path, "GET /elgato/accessory-info"))
-        limit = (info.get("power-info") or {}).get("maximumBrightness", 100)
-        cached = USB_LIGHT_INFO[key] = (time.monotonic(), max(1, min(100, int(limit))))
+        # A light that answers /elgato/lights stays usable without its
+        # accessory info; an unresponsive one still raises TimeoutError.
+        try:
+            info = json.loads(usb_light_exchange(path, "GET /elgato/accessory-info"))
+            limit = int((info.get("power-info") or {}).get("maximumBrightness") or 100)
+        except (RuntimeError, ValueError, TypeError, AttributeError): limit = 100
+        cached = USB_LIGHT_INFO[key] = (time.monotonic(), max(1, min(100, limit)))
     return cached[1]
 
 def usb_light_request(light, payload=None):
@@ -1061,15 +1067,22 @@ class Daemon:
         if not self.light_states: self.refresh_lights()
         reachable = [x for x in self.light_states if x.get("reachable")]
         if not reachable: self.status["error"] = "No Elgato lights reachable"; return
-        current = reachable[0]
-        if action == "lights_toggle": payload = {"on": 0 if any(x.get("on") for x in reachable) else 1}
-        elif action == "lights_brightness_up": payload = {"brightness": min(100, int(current.get("brightness", 40)) + 5), "on": 1}
-        elif action == "lights_brightness_down": payload = {"brightness": max(1, int(current.get("brightness", 40)) - 5), "on": 1}
-        elif action == "lights_warmer": payload = {"temperature": min(344, int(current.get("temperature", 200)) + 10), "on": 1}
-        elif action == "lights_cooler": payload = {"temperature": max(143, int(current.get("temperature", 200)) - 10), "on": 1}
+        # Steps are relative to each light's own level, so lights with
+        # different brightness ceilings (USB power) do not drag each other.
+        if action == "lights_toggle":
+            power = 0 if any(x.get("on") for x in reachable) else 1
+            def payload(light): return {"on": power}
+        elif action in ("lights_brightness_up", "lights_brightness_down"):
+            delta = 5 if action == "lights_brightness_up" else -5
+            def payload(light):
+                ceiling = int(light.get("maxBrightness") or 100)
+                return {"brightness": max(1, min(ceiling, int(light.get("brightness", 40)) + delta)), "on": 1}
+        elif action in ("lights_warmer", "lights_cooler"):
+            delta = 10 if action == "lights_warmer" else -10
+            def payload(light): return {"temperature": max(143, min(344, int(light.get("temperature", 200)) + delta)), "on": 1}
         else: return
         for light in reachable:
-            try: light_request(light, payload)
+            try: light_request(light, payload(light))
             except Exception as e: self.status["error"] = "Light: " + str(e)
         self.refresh_lights()
 
