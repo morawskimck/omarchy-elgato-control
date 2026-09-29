@@ -16,7 +16,7 @@ Panel {
   property var status: ({ running: false, plus: null, deck: null, pedal: null, profile: "Omarchy Default", brightness: 55 })
   property var profile: ({ keys: [], dials: [], pedals: [] })
   property string error: ""
-  readonly property bool connected: status.plus != null || status.deck != null || status.pedal != null
+  readonly property bool connected: status.plus != null || status.deck != null || status.pedal != null || hasWave || hasLights
   readonly property bool hasPlus: status.plus != null
   // Either a Stream Deck + or a key-only panel (MK.2, XL, Original V2) drives the key grid.
   readonly property var deck: status.plus != null ? status.plus : status.deck
@@ -32,6 +32,7 @@ Panel {
   readonly property bool hasScreen: hasDeck && (deck.capabilities || []).indexOf("screen") >= 0
   onPageCountChanged: if (selectedPage >= pageCount) selectedPage = pageCount - 1
   readonly property bool hasWave: status.wave !== null && status.wave !== undefined
+  readonly property string waveName: hasWave && status.wave.product ? String(status.wave.product).replace(/^Elgato /, "") : "Wave"
   readonly property bool hasLights: (status.lights || []).some(function(x) { return x.reachable })
   readonly property string helper: Qt.resolvedUrl("bin/elgato-control").toString().replace("file://", "")
   property var actionOptions: []
@@ -45,7 +46,7 @@ Panel {
   readonly property var deviceOptions: [
     hasDeck ? { value: "streamdeck", label: deck.label || "Stream Deck" } : null,
     hasPedal ? { value: "pedal", label: "Pedal" } : null,
-    hasWave ? { value: "wave", label: "Wave:3" } : null,
+    hasWave ? { value: "wave", label: root.waveName } : null,
     hasLights ? { value: "lights", label: "Key Lights" } : null
   ].filter(function(x) { return x !== null })
 
@@ -117,6 +118,8 @@ Panel {
   }
   function close() { root.controller.hide() }
   function toggle() { if (root.opened) close(); else open() }
+  // The bar icon reads `connected`, so status keeps polling while the panel is closed.
+  function pollStatus() { if (!statusProc.running) statusProc.running = true }
   function refresh() {
     if (!statusProc.running) statusProc.running = true
     if (!profileProc.running) profileProc.running = true
@@ -172,7 +175,7 @@ Panel {
     }
     onExited: function(code) { if (code !== 0) root.error = "Key Light control failed"; root.refresh() }
   }
-  Timer { interval: 1500; repeat: true; running: root.opened; triggeredOnStart: true; onTriggered: root.refresh() }
+  Timer { interval: root.opened ? 1500 : 10000; repeat: true; running: true; triggeredOnStart: true; onTriggered: root.opened ? root.refresh() : root.pollStatus() }
 
   KeyboardPanel {
     id: panel
@@ -393,7 +396,7 @@ Panel {
             width: parent.width * 0.39 - Style.space(14); spacing: Style.space(10)
             Text { text: "ACTION INSPECTOR"; color: Color.muted; font.family: Style.font.family; font.pixelSize: 10; font.bold: true }
             Text {
-              text: root.selectedDevice === "streamdeck" ? (root.selectedControl === "key" ? "Key " + (root.selectedIndex + 1) + (root.pageCount > 1 ? " · Page " + (root.selectedPage + 1) : "") : "Dial " + (root.selectedIndex + 1)) : root.selectedDevice === "pedal" ? ["Left pedal", "Middle pedal", "Right pedal"][root.selectedIndex] : root.selectedDevice === "wave" ? "Wave:3" : root.selectedLightName(); textFormat: Text.PlainText
+              text: root.selectedDevice === "streamdeck" ? (root.selectedControl === "key" ? "Key " + (root.selectedIndex + 1) + (root.pageCount > 1 ? " · Page " + (root.selectedPage + 1) : "") : "Dial " + (root.selectedIndex + 1)) : root.selectedDevice === "pedal" ? ["Left pedal", "Middle pedal", "Right pedal"][root.selectedIndex] : root.selectedDevice === "wave" ? root.waveName : root.selectedLightName(); textFormat: Text.PlainText
               color: Color.foreground; font.family: Style.font.family; font.pixelSize: 15; font.bold: true
             }
             Text { visible: root.selectedDevice === "streamdeck" || root.selectedDevice === "pedal"; width: parent.width; wrapMode: Text.WordWrap; text: "Choose an application, system function, or key. Changes apply immediately."; color: Color.muted; font.family: Style.font.family; font.pixelSize: 10 }

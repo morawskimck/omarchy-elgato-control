@@ -13,7 +13,7 @@ Current version: **0.3.1**
 - Stream Deck Neo (`0fd9:009a`): eight keys (4×2) with 96×96 artwork rotated 180°, two touch sensors that flip between key pages, a 248×58 info screen showing the clock, page, microphone mute, and Key Light state, and device brightness
 - Stream Deck Pedal (`0fd9:0086`): three pedal events
 - Elgato Key Light Neo: automatic mDNS discovery, grouped power, brightness, temperature, and live status
-- Wave:3: automatic PipeWire detection; microphone actions target the detected Wave source rather than an unrelated default microphone
+- Wave:3 and Wave Neo: automatic PipeWire detection; microphone actions target the detected Wave source rather than an unrelated default microphone
 - Elgato bar icon and a visual configuration editor that applies changes at runtime
 
 The panel is capability-driven: Plus-only LCD/dial controls, Pedal mappings,
@@ -170,16 +170,22 @@ Lights** or an individual light, then switch power on or off, set brightness
 from 1–100%, set color temperature from 2900–7000K, or refresh discovery and
 status. Unreachable lights remain visible with their controls disabled.
 
-## Wave:3 controls
+## Wave controls
 
-When a Wave:3 is detected, its device page exposes the hardware controls that
-Linux publishes through ALSA and PipeWire:
+When a Wave:3 or Wave Neo is detected, its device page exposes the hardware
+controls that Linux publishes through ALSA and PipeWire:
 
-- microphone gain in 1 dB steps with a 0–40 dB readout;
+- microphone gain in 1 dB steps, read against the range the firmware reports
+  (0–40 dB on the Wave:3, 0–30 dB on the Wave Neo);
 - hardware microphone mute;
 - headphone volume and mute;
-- Quiet Room (30 dB), Normal (20 dB), and Loud Environment (10 dB) gain presets;
-- set Wave:3 as the default PipeWire microphone.
+- Quiet Room (30 dB), Normal (20 dB), and Loud Environment (10 dB) gain presets,
+  clamped to the microphone's range;
+- set the Wave as the default PipeWire microphone.
+
+The Wave:3 names its capture controls `Mic Capture Volume` and `Mic Capture
+Switch`; the Wave Neo exposes the same controls as `PCM Capture Volume` and
+`PCM Capture Switch`. The daemon uses whichever the detected microphone has.
 
 The same operations appear in the action catalog, so a Stream Deck key, dial,
 or Pedal can control Wave gain, mute, headphones, or presets. Vendor-only

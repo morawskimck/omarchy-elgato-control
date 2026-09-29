@@ -92,6 +92,68 @@ class DeviceModelTests(unittest.TestCase):
             module.perform_wave_action(wave, "wave_gain_up")
         setter.assert_called_once_with(2, "Mic Capture Volume", 42)
 
+    def test_alsa_control_reads_firmware_decibel_range(self):
+        output = ("numid=5,iface=MIXER,name='PCM Capture Volume'\n"
+                  "  ; type=INTEGER,access=rw---R--,values=1,min=0,max=80,step=0\n"
+                  "  : values=40\n"
+                  "  | dBminmax-min=0.00dB,max=30.00dB\n")
+        completed = module.subprocess.CompletedProcess([], 0, stdout=output)
+        with mock.patch.object(module.subprocess, "run", return_value=completed):
+            control = module.read_alsa_control(0, "PCM Capture Volume")
+        self.assertEqual({"value": 40, "min": 0, "max": 80, "percent": 50, "dbMin": 0.0, "dbMax": 30.0}, control)
+
+    def test_wave_neo_gain_uses_pcm_capture_controls(self):
+        controls = {"PCM Capture Volume": {"value": 40, "min": 0, "max": 80, "percent": 50, "dbMin": 0.0, "dbMax": 30.0},
+                    "PCM Capture Switch": {"on": False}}
+        with mock.patch.object(module, "read_alsa_control", side_effect=lambda card, name: controls.get(name)):
+            wave = module.read_wave_controls(0)
+        self.assertEqual("PCM Capture Volume", wave["gainControl"])
+        self.assertEqual("PCM Capture Switch", wave["muteControl"])
+        self.assertEqual(15.0, wave["gainDb"])
+        self.assertEqual(30.0, wave["gainDbMax"])
+        self.assertTrue(wave["muted"])
+
+    def test_wave_three_gain_keeps_mic_capture_controls(self):
+        controls = {"Mic Capture Volume": {"value": 40, "min": 0, "max": 80, "percent": 50},
+                    "Mic Capture Switch": {"on": True}}
+        with mock.patch.object(module, "read_alsa_control", side_effect=lambda card, name: controls.get(name)):
+            wave = module.read_wave_controls(2)
+        self.assertEqual("Mic Capture Volume", wave["gainControl"])
+        self.assertEqual(20.0, wave["gainDb"])
+        self.assertFalse(wave["muted"])
+
+    def wave_neo(self, raw=40):
+        return {"card": 0, "gainRaw": raw, "gainMin": 0, "gainMax": 80, "gainDbMin": 0.0, "gainDbMax": 30.0,
+                "gainControl": "PCM Capture Volume", "muteControl": "PCM Capture Switch"}
+
+    def test_wave_neo_gain_step_is_one_decibel(self):
+        with mock.patch.object(module, "set_alsa_control") as setter:
+            module.perform_wave_action(self.wave_neo(40), "wave_gain_up")
+            module.perform_wave_action(self.wave_neo(80), "wave_gain_up")
+            module.perform_wave_action(self.wave_neo(2), "wave_gain_down")
+        self.assertEqual([mock.call(0, "PCM Capture Volume", 43), mock.call(0, "PCM Capture Volume", 80),
+                          mock.call(0, "PCM Capture Volume", 0)], setter.call_args_list)
+
+    def test_wave_neo_presets_convert_decibels_to_its_range(self):
+        with mock.patch.object(module, "set_alsa_control") as setter:
+            for action in ("wave_preset_quiet", "wave_preset_normal", "wave_preset_loud"):
+                module.perform_wave_action(self.wave_neo(), action)
+        self.assertEqual([mock.call(0, "PCM Capture Volume", 80), mock.call(0, "PCM Capture Volume", 53),
+                          mock.call(0, "PCM Capture Volume", 27)], setter.call_args_list)
+
+    def test_wave_neo_mute_toggles_its_capture_switch(self):
+        with mock.patch.object(module, "set_alsa_control") as setter:
+            module.perform_wave_action(self.wave_neo(), "wave_mute")
+        setter.assert_called_once_with(0, "PCM Capture Switch", "toggle")
+
+    def test_wave_three_presets_are_unchanged(self):
+        wave = {"card": 2, "gainRaw": 40, "sourceId": 89}
+        with mock.patch.object(module, "set_alsa_control") as setter:
+            for action in ("wave_preset_quiet", "wave_preset_normal", "wave_preset_loud"):
+                module.perform_wave_action(wave, action)
+        self.assertEqual([mock.call(2, "Mic Capture Volume", 60), mock.call(2, "Mic Capture Volume", 40),
+                          mock.call(2, "Mic Capture Volume", 20)], setter.call_args_list)
+
     def test_wave_push_to_default_uses_detected_source(self):
         wave = {"card": 2, "gainRaw": 40, "sourceId": 89}
         with mock.patch.object(module, "set_default_wave_source") as setter:
@@ -401,6 +463,22 @@ class QmlPlainTextTests(unittest.TestCase):
         panel = self.PANEL.read_text()
         self.assertIn('[root.helper, "add-page"]', panel)
         self.assertIn('[root.helper, "remove-page", String(root.selectedPage + 1)]', panel)
+
+    def test_wave_is_named_after_the_detected_model(self):
+        """A Wave Neo must not be labelled Wave:3 in the device picker or inspector."""
+        self.assertNotIn('"Wave:3"', self.PANEL.read_text())
+
+    def test_wave_or_lights_alone_count_as_connected(self):
+        panel = self.PANEL.read_text()
+        line = next(x for x in panel.splitlines() if "readonly property bool connected:" in x)
+        self.assertIn("hasWave", line)
+        self.assertIn("hasLights", line)
+
+    def test_bar_status_is_polled_while_the_panel_is_closed(self):
+        """The bar icon reads `connected` from the panel, so status must refresh while it is closed."""
+        panel = self.PANEL.read_text()
+        timer = next(x for x in panel.splitlines() if x.strip().startswith("Timer {") and "refresh" in x)
+        self.assertNotIn("running: root.opened", timer)
 
 
 if __name__ == "__main__":

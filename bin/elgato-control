@@ -554,7 +554,7 @@ def detect_wave():
             match = re.search(r'alsa\.card\s*=\s*"?(\d+)', inspect)
             if match: card = int(match.group(1))
         except (OSError, subprocess.TimeoutExpired): pass
-    wave = {"product": names[0], "kind": "microphone", "capabilities": ["microphone", "mute", "gain", "headphones", "presets"],
+    wave = {"product": plain_text(names[0], "Elgato Wave"), "kind": "microphone", "capabilities": ["microphone", "mute", "gain", "headphones", "presets"],
             "connected": True, "sourceId": source_id, "sinkId": sink_id, "card": card}
     wave.update(read_wave_controls(card))
     return wave
@@ -567,46 +567,90 @@ def read_alsa_control(card, name):
     except (OSError, subprocess.TimeoutExpired): return None
     value = re.search(r": values=([^\n]+)", output)
     limits = re.search(r"min=(-?\d+),max=(-?\d+)", output)
+    decibels = re.search(r"dBminmax-min=(-?[\d.]+)dB,max=(-?[\d.]+)dB", output)
     if not value: return None
     raw = value.group(1).strip()
     if raw in ("on", "off"): return {"on": raw == "on"}
     try: number = int(raw.split(",", 1)[0])
     except ValueError: return None
     low, high = (int(limits.group(1)), int(limits.group(2))) if limits else (0, 100)
-    return {"value": number, "min": low, "max": high, "percent": round((number - low) * 100 / max(1, high - low))}
+    control = {"value": number, "min": low, "max": high, "percent": round((number - low) * 100 / max(1, high - low))}
+    if decibels: control.update(dbMin=float(decibels.group(1)), dbMax=float(decibels.group(2)))
+    return control
+
+# The Wave:3 names its capture controls after the microphone terminal. The Wave
+# Neo routes the microphone through an extension unit first, which hides that
+# terminal from the kernel's naming, so the same controls fall back to "PCM".
+WAVE_GAIN_CONTROLS = ("Mic Capture Volume", "PCM Capture Volume")
+WAVE_MUTE_CONTROLS = ("Mic Capture Switch", "PCM Capture Switch")
+# Used when the firmware publishes no dB range: the Wave:3's 0-80 steps are 0.5 dB.
+WAVE_GAIN_SCALE = {"gainMin": 0, "gainMax": 80, "gainDbMin": 0.0, "gainDbMax": 40.0}
+
+def first_alsa_control(card, names):
+    for name in names:
+        control = read_alsa_control(card, name)
+        if control: return name, control
+    return names[0], {}
+
+def wave_scale(wave):
+    return {key: wave[key] if wave.get(key) is not None else fallback for key, fallback in WAVE_GAIN_SCALE.items()}
+
+def wave_gain_db(wave, raw):
+    scale = wave_scale(wave)
+    span = max(1, scale["gainMax"] - scale["gainMin"])
+    return round(scale["gainDbMin"] + (raw - scale["gainMin"]) * (scale["gainDbMax"] - scale["gainDbMin"]) / span, 1)
+
+def wave_gain_raw(wave, decibels):
+    """Convert a gain in dB to the nearest raw step, clamped to the device range."""
+    scale = wave_scale(wave)
+    span = (scale["gainDbMax"] - scale["gainDbMin"]) or 1
+    raw = scale["gainMin"] + (decibels - scale["gainDbMin"]) * (scale["gainMax"] - scale["gainMin"]) / span
+    return max(scale["gainMin"], min(scale["gainMax"], round(raw)))
+
+def wave_gain_step(wave, direction):
+    """Move the gain by the raw step nearest to 1 dB."""
+    scale = wave_scale(wave)
+    step = max(1, round((scale["gainMax"] - scale["gainMin"]) / ((scale["gainDbMax"] - scale["gainDbMin"]) or 1)))
+    raw = int(wave.get("gainRaw") or 0) + direction * step
+    return max(scale["gainMin"], min(scale["gainMax"], raw))
 
 def read_wave_controls(card):
-    gain = read_alsa_control(card, "Mic Capture Volume") or {}
-    mic_switch = read_alsa_control(card, "Mic Capture Switch") or {}
+    gain_control, gain = first_alsa_control(card, WAVE_GAIN_CONTROLS)
+    mute_control, mic_switch = first_alsa_control(card, WAVE_MUTE_CONTROLS)
     headphones = read_alsa_control(card, "PCM Playback Volume") or {}
     headphone_switch = read_alsa_control(card, "PCM Playback Switch") or {}
-    return {"gainRaw": gain.get("value"), "gainDb": round(gain.get("value", 0) / 2, 1) if gain else None,
-            "gainPercent": gain.get("percent"), "muted": not mic_switch.get("on", True),
-            "headphonePercent": headphones.get("percent"), "headphoneMuted": not headphone_switch.get("on", True)}
+    scale = dict(WAVE_GAIN_SCALE)
+    if gain: scale.update(gainMin=gain["min"], gainMax=gain["max"])
+    if "dbMin" in gain: scale.update(gainDbMin=gain["dbMin"], gainDbMax=gain["dbMax"])
+    return dict(scale, gainControl=gain_control, muteControl=mute_control,
+                gainRaw=gain.get("value"), gainDb=wave_gain_db(scale, gain["value"]) if gain else None,
+                gainPercent=gain.get("percent"), muted=not mic_switch.get("on", True),
+                headphonePercent=headphones.get("percent"), headphoneMuted=not headphone_switch.get("on", True))
 
 def set_alsa_control(card, name, value):
-    if card is None: raise RuntimeError("Wave:3 ALSA card is unavailable")
+    if card is None: raise RuntimeError("Wave ALSA card is unavailable")
     result = subprocess.run(["amixer", "-q", "-c", str(card), "cset", "name=" + name, str(value)],
                             capture_output=True, text=True, timeout=3)
-    if result.returncode != 0: raise RuntimeError(result.stderr.strip() or "Could not update Wave:3")
+    if result.returncode != 0: raise RuntimeError(result.stderr.strip() or "Could not update Wave")
 
 def set_default_wave_source(source_id):
-    if source_id is None: raise RuntimeError("Wave:3 input is unavailable")
+    if source_id is None: raise RuntimeError("Wave input is unavailable")
     result = subprocess.run(["wpctl", "set-default", str(source_id)], capture_output=True, text=True, timeout=3)
     if result.returncode != 0: raise RuntimeError(result.stderr.strip() or "Could not set default microphone")
 
 def perform_wave_action(wave, action):
-    if not wave: raise RuntimeError("Wave:3 is not connected")
+    if not wave: raise RuntimeError("Wave is not connected")
     card = wave.get("card")
-    if action == "wave_gain_up": set_alsa_control(card, "Mic Capture Volume", min(80, int(wave.get("gainRaw") or 0) + 2))
-    elif action == "wave_gain_down": set_alsa_control(card, "Mic Capture Volume", max(0, int(wave.get("gainRaw") or 0) - 2))
-    elif action == "wave_mute": set_alsa_control(card, "Mic Capture Switch", "toggle")
+    gain = wave.get("gainControl") or WAVE_GAIN_CONTROLS[0]
+    if action == "wave_gain_up": set_alsa_control(card, gain, wave_gain_step(wave, 1))
+    elif action == "wave_gain_down": set_alsa_control(card, gain, wave_gain_step(wave, -1))
+    elif action == "wave_mute": set_alsa_control(card, wave.get("muteControl") or WAVE_MUTE_CONTROLS[0], "toggle")
     elif action == "wave_headphone_up": set_alsa_control(card, "PCM Playback Volume", "5%+")
     elif action == "wave_headphone_down": set_alsa_control(card, "PCM Playback Volume", "5%-")
     elif action == "wave_headphone_mute": set_alsa_control(card, "PCM Playback Switch", "toggle")
-    elif action == "wave_preset_quiet": set_alsa_control(card, "Mic Capture Volume", 60)  # 30 dB
-    elif action == "wave_preset_normal": set_alsa_control(card, "Mic Capture Volume", 40)  # 20 dB
-    elif action == "wave_preset_loud": set_alsa_control(card, "Mic Capture Volume", 20)  # 10 dB
+    elif action == "wave_preset_quiet": set_alsa_control(card, gain, wave_gain_raw(wave, 30))
+    elif action == "wave_preset_normal": set_alsa_control(card, gain, wave_gain_raw(wave, 20))
+    elif action == "wave_preset_loud": set_alsa_control(card, gain, wave_gain_raw(wave, 10))
     elif action == "wave_default": set_default_wave_source(wave.get("sourceId"))
     else: raise RuntimeError("Unknown Wave action: " + action)
 

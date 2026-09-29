@@ -12,6 +12,9 @@
 - Index the icon themes once per lookup batch instead of globbing them per application, cutting a catalog build on a typical system from ~0.6s to ~0.06s.
 - Drop stale per-device key state when a device disconnects, so swapping panels on the same hidraw node cannot crash the daemon.
 - Report profile read and write failures during device connect through `status.error` instead of terminating the daemon.
+- Support the Wave Neo: find its gain and mute under the `PCM Capture` mixer names it exposes instead of the Wave:3's `Mic Capture` ones, read gain in dB from the range the firmware reports, and convert the 1 dB gain step and the presets to that range.
+- Name the Wave device page after the detected model instead of always showing Wave:3.
+- Count a Wave or a reachable Key Light as connected, and keep polling status while the panel is closed, so the bar icon no longer shows Disconnected until the panel is first opened.
 
 ## 0.3.1 — 2026-08-20
 
