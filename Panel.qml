@@ -29,8 +29,14 @@ Panel {
   property int selectedPage: 0
   readonly property int pageCount: 1 + (profile.pages || []).length
   readonly property int livePage: status.page || 0
+  readonly property bool hasPages: hasDeck && (deck.capabilities || []).indexOf("pages") >= 0
   readonly property bool hasScreen: hasDeck && (deck.capabilities || []).indexOf("screen") >= 0
-  onPageCountChanged: if (selectedPage >= pageCount) selectedPage = pageCount - 1
+  // A page being added is selected once the reloaded profile contains it.
+  property int pendingPage: -1
+  onPageCountChanged: {
+    if (pendingPage >= 0 && pendingPage < pageCount) { selectedPage = pendingPage; pendingPage = -1 }
+    if (selectedPage >= pageCount) selectedPage = pageCount - 1
+  }
   readonly property bool hasWave: status.wave !== null && status.wave !== undefined
   readonly property bool hasLights: (status.lights || []).some(function(x) { return x.reachable })
   readonly property string helper: Qt.resolvedUrl("bin/elgato-control").toString().replace("file://", "")
@@ -54,7 +60,7 @@ Panel {
   function addPage() {
     if (pageProc.running) return
     pageProc.command = [root.helper, "add-page"]
-    root.selectedPage = root.pageCount
+    root.pendingPage = root.pageCount
     pageProc.running = true
   }
   function removePage() {
@@ -147,7 +153,13 @@ Panel {
     }
   }
   Process { id: saveProc; onExited: function() { root.refresh() } }
-  Process { id: pageProc; onExited: function() { root.refresh() } }
+  Process {
+    id: pageProc
+    onExited: function(code) {
+      if (code !== 0) { root.pendingPage = -1; root.error = "Could not change pages" }
+      root.refresh()
+    }
+  }
   Process { id: waveProc; onExited: function() { root.refresh() } }
   Process {
     id: lightProc
@@ -222,7 +234,10 @@ Panel {
               id: deckColumn
               visible: root.selectedDevice === "streamdeck"; anchors.centerIn: parent; width: parent.width - Style.space(28); spacing: Style.space(10)
               Text { anchors.horizontalCenter: parent.horizontalCenter; text: (root.hasDeck && root.deck.label ? root.deck.label : "Stream Deck").toUpperCase(); color: Color.muted; font.family: Style.font.family; font.pixelSize: 10; font.bold: true }
+              // Page tabs, only on panels whose touch sensors flip pages: elsewhere
+              // a new blank page would have no key to flip back with.
               Row {
+                visible: root.hasPages
                 anchors.horizontalCenter: parent.horizontalCenter; spacing: Style.space(6)
                 Text { anchors.verticalCenter: parent.verticalCenter; text: "PAGE"; color: Color.muted; font.family: Style.font.family; font.pixelSize: 9; font.bold: true }
                 Repeater { model: root.pageCount

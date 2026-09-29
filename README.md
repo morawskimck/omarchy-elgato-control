@@ -107,11 +107,11 @@ that one control in the action inspector.
 - A 2×4 Stream Deck preview selects individual keys.
 - The LCD strip and four dial controls are represented visually.
 - Each Plus dial exposes left, press, and right actions only when selected.
-- Page tabs above the key grid switch between key pages; **+** adds a page
-  and **×** removes the selected one. A dot marks the page the panel is
-  showing. On a Stream Deck Neo the left and right touch sensors flip to the
-  previous and next page, wrapping around; any key, dial, or pedal can do the
-  same with the Previous Page and Next Page functions.
+- On a Stream Deck Neo, page tabs above the key grid switch between key
+  pages; **+** adds a page and **×** removes the selected one. A dot marks the
+  page the panel is showing. The left and right touch sensors flip to the
+  previous and next page, wrapping around, and any key, dial, or pedal can do
+  the same with the Previous Page and Next Page functions.
 - A three-part Pedal preview selects the left, middle, or right pedal.
 - Installed desktop applications are discovered from standard `.desktop` files.
 - Built-in functions include audio, media, workspaces, screenshots, OmaMeet,

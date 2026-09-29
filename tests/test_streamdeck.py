@@ -23,6 +23,10 @@ class DeviceModelTests(unittest.TestCase):
     def test_pedal_capabilities_do_not_assume_lcd(self):
         self.assertEqual(["pedals"], module.DEVICE_SPECS[module.PEDAL]["capabilities"])
 
+    def test_lcd_svg_escapes_dial_labels(self):
+        svg = module.lcd_svg({"dials": [{"label": "A&B <c>"}]}, 55, [])
+        self.assertIn("A&amp;B &lt;c&gt;", svg)
+
     def test_lcd_svg_has_required_dimensions_and_labels(self):
         profile = {"dials": [{"label": "Volume"}, {"label": "Microphone"}]}
         svg = module.lcd_svg(profile, 55, [])
@@ -196,7 +200,10 @@ class StreamDeckNeoTests(unittest.TestCase):
         return daemon
 
     def neo(self):
-        return {"path": "/dev/hidraw15", "productId": module.NEO, "handle": object(), "kind": "streamdeck"}
+        spec = module.DEVICE_SPECS[module.NEO]
+        return {"path": "/dev/hidraw15", "productId": module.NEO, "serial": "A7BSA42312ZGQ1", "product": "Stream Deck Neo",
+                "kind": "streamdeck", "label": spec["label"], "keys": spec["keys"], "columns": spec["columns"],
+                "capabilities": spec["capabilities"], "handle": object()}
 
     def test_neo_is_a_paged_eight_key_panel_with_an_info_screen(self):
         spec = module.DEVICE_SPECS[module.NEO]
@@ -254,6 +261,47 @@ class StreamDeckNeoTests(unittest.TestCase):
             daemon.decorate(self.neo())
         self.assertEqual(["page2_key%d" % i for i in range(8)], drawn)
         self.assertEqual({8, 9}, {f[2] for f in daemon.hid.features if f[:2] == [0x03, 0x06]})
+
+    def test_short_page_is_drawn_blank_past_its_last_key(self):
+        profile = paged_profile(pages=2)
+        profile["pages"][0]["keys"] = profile["pages"][0]["keys"][:3]
+        daemon = self.make_daemon(profile); daemon.page = 1
+        drawn = []
+        with mock.patch.object(module.Daemon, "key_image", lambda self, dev, index, key, spec: drawn.append(key["action"])), \
+             mock.patch.object(module.Daemon, "update_screen"):
+            daemon.decorate(self.neo())
+        self.assertEqual(["page1_key0", "page1_key1", "page1_key2"] + [""] * 5, drawn)
+
+    def test_live_page_follows_its_keys_when_an_earlier_page_is_removed(self):
+        daemon = self.make_daemon(); daemon.page = 2
+        old = daemon.profile
+        daemon.profile = {"keys": old["pages"][0]["keys"], "pages": [old["pages"][1]]}
+        daemon.follow_page(old)
+        self.assertEqual(1, daemon.page)
+
+    def test_live_page_keeps_its_place_when_its_keys_are_edited(self):
+        daemon = self.make_daemon(); daemon.page = 1
+        old = daemon.profile
+        daemon.profile = module.json.loads(module.json.dumps(old))
+        daemon.profile["pages"][0]["keys"][0]["action"] = "lock"
+        daemon.follow_page(old)
+        self.assertEqual(1, daemon.page)
+
+    def test_mic_state_is_read_with_device_polling_when_a_screen_is_attached(self):
+        daemon = self.make_daemon()
+        neo = self.neo(); daemon.devices = {neo["path"]: neo}
+        daemon.hid.paths = lambda: [{k: v for k, v in neo.items() if k != "handle"}]
+        with mock.patch.object(module, "detect_wave", return_value=None), \
+             mock.patch.object(module, "mic_muted", return_value=True) as muted:
+            daemon.connect()
+        muted.assert_called_once_with(None)
+        self.assertTrue(daemon.status["micMuted"])
+
+    def test_paged_upload_carries_command_index_and_page_numbers(self):
+        daemon = self.make_daemon()
+        daemon.write_paged(object(), 0x07, 3, bytes(1017))
+        self.assertEqual([[0x02, 0x07, 3, 0, 1016 & 255, 1016 >> 8, 0, 0], [0x02, 0x07, 3, 1, 1, 0, 1, 0]],
+                         [w[:8] for w in daemon.hid.writes])
 
     def test_single_page_profile_leaves_touch_sensors_dark(self):
         daemon = self.make_daemon(paged_profile(pages=1))
@@ -396,6 +444,18 @@ class QmlPlainTextTests(unittest.TestCase):
         self.assertIn("model: root.pageKeys(root.selectedPage).slice(0, root.deckKeys)", panel)
         self.assertIn('"--page", String(root.selectedPage + 1)', panel)
         self.assertIn("(root.pageKeys(root.selectedPage)[root.selectedIndex] || {}).action", panel)
+
+    def test_page_tabs_appear_only_on_panels_that_can_flip_pages(self):
+        panel = self.PANEL.read_text()
+        self.assertIn('readonly property bool hasPages: hasDeck && (deck.capabilities || []).indexOf("pages") >= 0', panel)
+        tabs = panel[panel.index("Page tabs"):]
+        self.assertIn("visible: root.hasPages", tabs[:tabs.index("Repeater")])
+
+    def test_new_page_is_selected_only_once_it_exists(self):
+        panel = self.PANEL.read_text()
+        add_page = panel[panel.index("function addPage()"):panel.index("function removePage()")]
+        self.assertNotIn("root.selectedPage = ", add_page)
+        self.assertIn("root.pendingPage = root.pageCount", add_page)
 
     def test_pages_can_be_added_and_removed_from_the_editor(self):
         panel = self.PANEL.read_text()

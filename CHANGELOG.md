@@ -3,7 +3,7 @@
 ## Unreleased
 
 - Add Stream Deck Neo support (`0fd9:009a`): eight 96×96 keys rotated 180°, touch sensors that flip key pages, and an info screen with the clock, page, microphone mute, and Key Light state, redrawn when any of them changes.
-- Add key pages to every Stream Deck: page tabs in the editor, `add-page`/`remove-page`/`set-key --page` in the CLI, and Previous Page and Next Page functions. Page 1 remains the profile's `keys` list.
+- Add key pages: page tabs in the Stream Deck Neo editor, `add-page`/`remove-page`/`set-key --page` in the CLI, and Previous Page and Next Page functions for any control. Page 1 remains the profile's `keys` list, and the live page follows its keys when an earlier page is removed.
 - Share the full-window upload and SVG rendering between the Plus LCD strip and the Neo info screen.
 - Describe each Stream Deck's key count, grid, artwork size, and artwork rotation per device, and grow the profile to the attached panel's key count.
 - Render key artwork as 3-component sRGB JPEG. ImageMagick emitted a 1-channel grayscale file for monochrome keys, which the panel firmware silently fails to decode: it repainted the last image it decoded, so an unassigned key showed a neighbour's artwork.
