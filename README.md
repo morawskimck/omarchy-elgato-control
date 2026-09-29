@@ -9,7 +9,7 @@ Current version: **0.3.1**
 
 - Stream Deck Plus (`0fd9:0084`): eight keys, four dials, 120×120 JPEG artwork, device brightness, and an 800×100 live dial LCD
 - Stream Deck Pedal (`0fd9:0086`): three pedal events
-- Elgato Key Light Neo: automatic mDNS discovery, grouped power, brightness, temperature, and live status
+- Elgato Key Light Neo over Wi-Fi (automatic mDNS discovery) or USB (automatic hidraw discovery): grouped power, brightness, temperature, and live status
 - Wave:3: automatic PipeWire detection; microphone actions target the detected Wave source rather than an unrelated default microphone
 - Elgato bar icon and a visual configuration editor that applies changes at runtime
 
@@ -132,7 +132,8 @@ bin/elgato-control daemon
 ## Automatic device discovery
 
 USB Stream Deck and Pedal devices are detected through hidapi. Wave microphones
-are detected through PipeWire. Key Lights are discovered over `_elg._tcp` mDNS
+are detected through PipeWire. USB-connected Key Light Neos are found through
+their hidraw nodes. Network Key Lights are discovered over `_elg._tcp` mDNS
 when the profile does not contain pinned hosts.
 
 ## Lights
@@ -146,6 +147,17 @@ Lights use stable mDNS hostnames rather than DHCP addresses. Discover yours with
 The default profile leaves this list empty so the repository does not publish
 device-specific network identities. Empty means automatic discovery; configured
 hosts override discovery when a network blocks mDNS.
+
+A Key Light Neo connected over USB needs no configuration: it is listed ahead of
+network lights and speaks the same JSON API framed in 512-byte HID reports.
+Its brightness ceiling depends on the power source (the firmware reports it
+and rejects anything higher), so brightness changes are clamped to it. The
+light needs read/write access to its hidraw node; if `/dev/hidraw*` for
+`0fd9:00a0` is not accessible to your user, add a udev rule such as:
+
+```
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0fd9", ATTRS{idProduct}=="00a0", TAG+="uaccess"
+```
 
 The Key Lights page provides direct grouped and per-light control. Select **All
 Lights** or an individual light, then switch power on or off, set brightness
@@ -183,6 +195,7 @@ bin/elgato-control status --json | jq .recentReports
 - [Elgato Stream Deck HID documentation](https://docs.elgato.com/streamdeck/hid/intro/)
 - [Stream Deck Plus HID documentation](https://docs.elgato.com/streamdeck/hid/stream-deck-plus/)
 - [Community Key Light HTTP API documentation](https://github.com/adamesch/elgato-key-light-api)
+- [Key Light Neo USB protocol analysis](https://zameermanji.com/blog/2026/3/4/elgato-key-light-neo-usb-protocol/) by Zameer Manji; the USB transport here is an independent implementation of that framing.
 - Key Light mDNS parsing was adapted from the MIT-licensed [nille/omarchy-elgato-keylight](https://github.com/nille/omarchy-elgato-keylight) implementation.
 - [Official Elgato icon resources](https://docs.elgato.com/resources/icons/)
 
