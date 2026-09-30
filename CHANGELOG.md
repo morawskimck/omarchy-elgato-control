@@ -4,6 +4,7 @@
 
 - Control USB-connected Key Light Neos (`0fd9:00a0`) through their hidraw node. The light carries the Wi-Fi JSON API in framed 512-byte HID reports; it is discovered from sysfs, listed ahead of network lights, and shares the device between the daemon and the panel's CLI with `flock`. Brightness is clamped to the power-source ceiling the light reports, which the firmware otherwise rejects.
 - Send grouped light actions only to reachable lights instead of every configured or discovered one, and step brightness and temperature from each light's own level rather than copying the first light's next value to all of them.
+- Render Key Light brightness and temperature, which come from the device, as plain text.
 - Rescan an empty network for Key Lights once a minute instead of on every 5 s refresh; each scan blocked HID polling for about a second.
 
 ## 0.3.1 — 2026-08-20
