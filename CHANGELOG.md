@@ -4,6 +4,8 @@
 
 - Support the Wave Neo: find its gain and mute under the `PCM Capture` mixer names it exposes instead of the Wave:3's `Mic Capture` ones, read gain in dB from the range the firmware reports, and convert the 1 dB gain step and the presets to that range.
 - Name the Wave device page after the detected model instead of always showing Wave:3.
+- Refuse a Wave gain step when the gain could not be read; it used to start from 0 and drop the gain to the floor.
+- Point microphone actions at the default source when a Wave has no PipeWire input, instead of a node named "None".
 - Count a Wave or a reachable Key Light as connected, and keep polling status while the panel is closed, so the bar icon no longer shows Disconnected until the panel is first opened.
 
 ## 0.3.1 — 2026-08-20
