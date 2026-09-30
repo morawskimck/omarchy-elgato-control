@@ -423,16 +423,24 @@ def rendered_key_image(action, label, color, size=120, flip=False):
 def blank_key(index):
     return {"label": str(index + 1), "action": "", "color": [40, 90, 130]}
 
+def extra_pages(profile):
+    pages = profile.get("pages")
+    return pages if isinstance(pages, list) else []
+
 def page_count(profile):
-    return 1 + len(profile.get("pages") or [])
+    return 1 + len(extra_pages(profile))
 
 def page_keys(profile, page):
     """The keys of a page. Page 0 is the profile's `keys` list, so a profile
-    without extra pages reads and saves exactly as before."""
-    if page == 0: return profile.setdefault("keys", [])
-    pages = profile.get("pages") or []
-    if not 0 < page <= len(pages): raise ValueError("Page is out of range")
-    return pages[page - 1].setdefault("keys", [])
+    without extra pages reads and saves exactly as before. A hand-edited page
+    of the wrong shape reads as empty instead of crashing the daemon."""
+    if page == 0: keys = profile.setdefault("keys", [])
+    else:
+        pages = extra_pages(profile)
+        if not 0 < page <= len(pages): raise ValueError("Page is out of range")
+        entry = pages[page - 1]
+        keys = entry.setdefault("keys", []) if isinstance(entry, dict) else None
+    return keys if isinstance(keys, list) else []
 
 def ensure_key_slots(profile, count):
     """Grow every page so each physical key on the attached panel is editable."""
@@ -445,8 +453,10 @@ def ensure_key_slots(profile, count):
 
 def add_page():
     profile = load_profile()
+    pages = profile.setdefault("pages", [])
+    if not isinstance(pages, list): raise ValueError("The profile's pages must be a list")
     size = max(len(page_keys(profile, page)) for page in range(page_count(profile))) or 8
-    profile.setdefault("pages", []).append({"keys": [blank_key(index) for index in range(size)]})
+    pages.append({"keys": [blank_key(index) for index in range(size)]})
     save_profile(profile)
     return page_count(profile)
 
@@ -455,8 +465,10 @@ def remove_page(index):
     count = page_count(profile)
     if count <= 1: raise ValueError("The only page cannot be removed")
     if not 0 <= index < count: raise ValueError("Page is out of range")
-    pages = profile["pages"]
-    if index == 0: profile["keys"] = pages.pop(0).get("keys", [])
+    pages = extra_pages(profile)
+    if index == 0:
+        first = pages.pop(0)
+        profile["keys"] = first.get("keys", []) if isinstance(first, dict) else []
     else: pages.pop(index - 1)
     if not pages: profile.pop("pages")
     save_profile(profile)
@@ -709,6 +721,7 @@ class Daemon:
         # A hand-edited page may be shorter than the panel; draw the rest blank
         # so a page flip does not leave the previous page's artwork behind.
         for i, key in enumerate((keys + [blank_key(i) for i in range(len(keys), count)])[:count]):
+            if not isinstance(key, dict): key = blank_key(i)
             if "touch" in capabilities:
                 color = key.get("color", [40, 90, 130])
                 self.hid.feature(dev, [0x03, 0x06, i] + [int(x) & 255 for x in color[:3]])
@@ -897,7 +910,7 @@ class Daemon:
             if len(states) < count: states += [0] * (count - len(states))
             if len(old) < count: old += [0] * (count - len(old))
             for i, state in enumerate(states):
-                if state and not old[i] and i < len(keys): self.act(keys[i].get("action"))
+                if state and not old[i] and i < len(keys) and isinstance(keys[i], dict): self.act(keys[i].get("action"))
             self.previous[cache] = states
             if "pages" in spec.get("capabilities", []):
                 sensors = spec.get("touchKeys", 0)
