@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Add Facecam Neo support (`0fd9:0081`): a Facecam page with the camera's exposure, color, lens, and image settings, read from the camera and written with `v4l2-ctl`, plus a privacy switch, a reset to the camera's defaults, and whether an application is streaming from the camera.
+- Show a live preview on the Facecam page while no application uses the camera, in its own QML file so the panel still loads without Qt Multimedia.
+- Save camera settings as named presets, apply them from the panel or a key, and apply the active preset again when the camera reconnects.
+- Add Facecam Privacy, Zoom In, Zoom Out, Autofocus, Reset Picture, Next Preset, and per-preset functions for keys, dials, and pedals. The Privacy key shows whether privacy is on, the Stream Deck Neo's info screen shows CAM LIVE or CAM PRIVATE, and the bar icon gets a dot while the camera is live.
+- Add a `facecam` CLI command for the camera's status, settings, functions, and presets.
+- Read the status file directly in the panel instead of starting the helper on every poll, and poll every 2 seconds while the panel is closed.
 - Add Stream Deck Neo support (`0fd9:009a`): eight 96×96 keys rotated 180°, touch sensors that flip key pages, and an info screen with the clock, page, microphone mute, and Key Light state, redrawn when any of them changes.
 - Add key pages: page tabs in the Stream Deck Neo editor, `add-page`/`remove-page`/`set-key --page` in the CLI, and Previous Page and Next Page functions for any control. Page 1 remains the profile's `keys` list, and the live page follows its keys when an earlier page is removed.
 - Share the full-window upload and SVG rendering between the Plus LCD strip and the Neo info screen.

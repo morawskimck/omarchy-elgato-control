@@ -14,11 +14,12 @@ Current version: **0.3.1**
 - Stream Deck Pedal (`0fd9:0086`): three pedal events
 - Elgato Key Light Neo over Wi-Fi (automatic mDNS discovery) or USB (automatic hidraw discovery): grouped power, brightness, temperature, and live status
 - Wave:3 and Wave Neo: automatic PipeWire detection; microphone actions target the detected Wave source rather than an unrelated default microphone
+- Facecam Neo (`0fd9:0081`): picture settings, a privacy switch, saved looks, a live preview, and whether an app is using the camera (other Facecam models are found by name and use the same standard controls, but are untested)
 - Elgato bar icon and a visual configuration editor that applies changes at runtime
 
 The panel is capability-driven: Plus-only LCD/dial controls, Pedal mappings,
-Wave controls, and Key Lights are shown only when the relevant hardware is
-detected.
+Wave controls, Facecam controls, and Key Lights are shown only when the
+relevant hardware is detected.
 
 ## Screenshots
 
@@ -33,6 +34,10 @@ detected.
 ### Wave:3
 
 ![Elgato Control Wave:3 controls](screenshots/wave-3.png)
+
+### Facecam Neo
+
+![Elgato Control Facecam Neo page while a call uses the camera](screenshots/facecam-neo.png)
 
 ### Key Lights
 
@@ -60,6 +65,7 @@ apply automatically.
 - ImageMagick for generated application artwork and Plus LCD rendering
 - PipeWire/WirePlumber and ALSA utilities for Wave controls
 - Avahi for automatic Key Light discovery
+- `v4l-utils` (`v4l2-ctl`) for Facecam controls, and optionally `qt6-multimedia` for the Facecam preview
 - `wtype` for keyboard-key actions
 
 ### Remove
@@ -138,6 +144,10 @@ bin/elgato-control daemon
 bin/elgato-control set-key 3 lock --page 2
 bin/elgato-control add-page
 bin/elgato-control remove-page 2
+bin/elgato-control facecam status
+bin/elgato-control facecam set white_balance_temperature 4500
+bin/elgato-control facecam privacy
+bin/elgato-control facecam save-preset "Evening"
 ```
 
 Page 1 is the profile's `keys` list; further pages live in `pages`, each with
@@ -150,8 +160,8 @@ its own `keys`, so a single-page profile is unchanged:
 ## Automatic device discovery
 
 USB Stream Deck and Pedal devices are detected through hidapi. Wave microphones
-are detected through PipeWire. USB-connected Key Light Neos are found through
-their hidraw nodes. Network Key Lights are discovered over `_elg._tcp` mDNS
+are detected through PipeWire. Facecams are found through their video nodes in
+sysfs. USB-connected Key Light Neos are found through their hidraw nodes. Network Key Lights are discovered over `_elg._tcp` mDNS
 when the profile does not contain pinned hosts.
 
 ## Lights
@@ -203,6 +213,41 @@ The same operations appear in the action catalog, so a Stream Deck key, dial,
 or Pedal can control Wave gain, mute, headphones, or presets. Vendor-only
 features such as Clipguard and low-cut filters remain out of scope until their
 USB protocol can be implemented and tested safely.
+
+## Facecam
+
+A Facecam is a standard USB video camera, so its settings are the V4L2
+controls any Linux video application sees; the plugin reads and writes them
+with `v4l2-ctl`. The Facecam page shows:
+
+- a live preview while the page is open and no application is using the
+  camera. It uses the camera's smallest format and stops when you switch pages
+  or close the panel, because an application cannot open the camera while the
+  preview has it. When an application such as Google Meet is using the camera,
+  the page says which one instead;
+- the camera's state: idle, live in an application, or privacy on;
+- **Privacy**, which makes the camera send a blank picture without
+  interrupting the application using it;
+- saved presets: **+ Save** stores the current settings under a name, a
+  preset applies with a click, and **×** deletes the highlighted one;
+- the settings in four tabs, with ranges read from the camera: **Exposure**
+  (automatic or manual, exposure time, gain, low-light frame rate,
+  anti-flicker, backlight compensation), **Color** (automatic white balance,
+  temperature, saturation), **Lens** (autofocus, focus, zoom, pan, tilt), and
+  **Image** (brightness, contrast, sharpness). A manual setting is greyed out
+  while its automatic mode is on. Sliders apply as you drag.
+
+Stream Deck keys, dials, and pedals can use Facecam Privacy, Zoom In, Zoom
+Out, Autofocus, Reset Picture, Next Preset, and each saved preset. A Privacy
+key shows a crossed-out camera while privacy is on, the Stream Deck Neo's info
+screen shows **CAM LIVE** or **CAM PRIVATE**, and the bar icon gets a dot
+while an application is using the camera.
+
+The active preset is applied again whenever the camera connects, in case it
+comes back with other settings. Changing any setting afterwards, other than
+privacy, clears the active preset, so a reconnect never undoes your own
+changes. If you also restore camera settings with cameractrls, use one or the
+other so they do not overwrite each other.
 
 ## Troubleshooting
 

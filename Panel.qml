@@ -16,7 +16,7 @@ Panel {
   property var status: ({ running: false, plus: null, deck: null, pedal: null, profile: "Omarchy Default", brightness: 55 })
   property var profile: ({ keys: [], dials: [], pedals: [] })
   property string error: ""
-  readonly property bool connected: status.plus != null || status.deck != null || status.pedal != null || hasWave || hasLights
+  readonly property bool connected: status.plus != null || status.deck != null || status.pedal != null || hasWave || hasLights || hasFacecam
   readonly property bool hasPlus: status.plus != null
   // Either a Stream Deck + or a key-only panel (MK.2, XL, Original V2) drives the key grid.
   readonly property var deck: status.plus != null ? status.plus : status.deck
@@ -43,6 +43,25 @@ Panel {
   readonly property bool hasWave: status.wave !== null && status.wave !== undefined
   readonly property string waveName: hasWave && status.wave.product ? String(status.wave.product).replace(/^Elgato /, "") : "Wave"
   readonly property bool hasLights: (status.lights || []).some(function(x) { return x.reachable })
+  // A `facecam` command returns the camera as it read it after the change;
+  // that reading wins until the daemon has read the camera again.
+  property var facecamReading: null
+  readonly property var facecam: {
+    var reported = status.facecam
+    var reading = facecamReading
+    if (!reported) return null
+    if (reading && reading.device === reported.device && (reading.controlsReadAt || 0) > (reported.controlsReadAt || 0))
+      return Object.assign({}, reported, { controls: reading.controls, groups: reading.groups, privacy: reading.privacy,
+                                           activePreset: reading.activePreset, controlsReadAt: reading.controlsReadAt })
+    return reported
+  }
+  readonly property bool hasFacecam: facecam !== null
+  readonly property bool facecamLive: hasFacecam && facecam.live === true
+  readonly property string facecamName: hasFacecam && facecam.label ? facecam.label : "Facecam"
+  readonly property var facecamPresets: (profile.facecam && Array.isArray(profile.facecam.presets) ? profile.facecam.presets : [])
+                                          .filter(function(preset) { return preset && typeof preset.name === "string" })
+  property var facecamQueue: []
+  readonly property string statusPath: (Quickshell.env("XDG_STATE_HOME") || Quickshell.env("HOME") + "/.local/state") + "/elgato-control/status.json"
   readonly property string helper: Qt.resolvedUrl("bin/elgato-control").toString().replace("file://", "")
   property var actionOptions: []
   property string selectedDevice: "streamdeck"
@@ -56,6 +75,7 @@ Panel {
     hasDeck ? { value: "streamdeck", label: deck.label || "Stream Deck" } : null,
     hasPedal ? { value: "pedal", label: "Pedal" } : null,
     hasWave ? { value: "wave", label: root.waveName } : null,
+    hasFacecam ? { value: "facecam", label: root.facecamName } : null,
     hasLights ? { value: "lights", label: "Key Lights" } : null
   ].filter(function(x) { return x !== null })
 
@@ -119,6 +139,20 @@ Panel {
     var limits = selectedLights().filter(function(light) { return light.reachable }).map(function(light) { return Number(light.maxBrightness || 100) })
     return limits.length ? Math.max.apply(null, limits) : 100
   }
+  // Commands run one at a time. A drag sends many values for one control, so
+  // only the latest waiting value for it is kept.
+  function facecamCommand(args) {
+    var queue = root.facecamQueue.filter(function(queued) { return !(args[0] === "set" && queued[0] === "set" && queued[1] === args[1]) })
+    queue.push(args)
+    root.facecamQueue = queue
+    root.runFacecam()
+  }
+  function runFacecam() {
+    if (facecamProc.running || root.facecamQueue.length === 0) return
+    facecamProc.command = [root.helper, "facecam"].concat(root.facecamQueue[0].map(String))
+    root.facecamQueue = root.facecamQueue.slice(1)
+    facecamProc.running = true
+  }
   function lightAction(action, value) {
     if (lightProc.running) return
     lightProc.command = [root.helper, "lights", action, "--target", root.selectedLightIndex < 0 ? "all" : String(root.selectedLightIndex)]
@@ -138,9 +172,9 @@ Panel {
   function close() { root.controller.hide() }
   function toggle() { if (root.opened) close(); else open() }
   // The bar icon reads `connected`, so status keeps polling while the panel is closed.
-  function pollStatus() { if (!statusProc.running) statusProc.running = true }
+  function pollStatus() { statusFile.reload() }
   function refresh() {
-    if (!statusProc.running) statusProc.running = true
+    statusFile.reload()
     if (!profileProc.running) profileProc.running = true
     if (root.actionOptions.length === 0 && !catalogProc.running) catalogProc.running = true
   }
@@ -149,16 +183,17 @@ Panel {
     return false
   }
 
-  Process {
-    id: statusProc
-    command: [root.helper, "status", "--json"]
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        try { root.status = JSON.parse(text); root.error = "" }
-        catch (e) { root.error = "Could not read Stream Deck status" }
-      }
+  // Read the daemon's status file directly: polling through the helper would
+  // start Python every few seconds while the panel is closed.
+  FileView {
+    id: statusFile
+    path: root.statusPath
+    printErrors: false
+    onLoaded: {
+      try { root.status = JSON.parse(text()); root.error = "" }
+      catch (e) { root.error = "Could not read Stream Deck status" }
     }
+    onLoadFailed: root.status = { running: false, plus: null, deck: null, pedal: null, profile: root.profile.name || "Default" }
   }
   Process {
     id: catalogProc
@@ -186,6 +221,26 @@ Panel {
   }
   Process { id: waveProc; onExited: function() { root.refresh() } }
   Process {
+    id: facecamProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        try { var reading = JSON.parse(text); if (reading) root.facecamReading = reading; root.error = "" } catch (e) {}
+      }
+    }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: { var line = text.trim().split("\n").pop(); if (line) root.error = "Facecam: " + line.replace(/^.*error: /, "") }
+    }
+    onExited: function(code) {
+      var command = facecamProc.command[2]
+      // Presets live in the profile, and each one is a function in the catalog.
+      if (command !== "set") root.refresh()
+      if ((command === "save-preset" || command === "delete-preset") && !catalogProc.running) catalogProc.running = true
+      root.runFacecam()
+    }
+  }
+  Process {
     id: lightProc
     stdout: StdioCollector {
       waitForEnd: true
@@ -200,7 +255,7 @@ Panel {
     }
     onExited: function(code) { if (code !== 0) root.error = "Key Light control failed"; root.refresh() }
   }
-  Timer { interval: root.opened ? 1500 : 10000; repeat: true; running: true; triggeredOnStart: true; onTriggered: root.opened ? root.refresh() : root.pollStatus() }
+  Timer { interval: root.opened ? 1500 : 2000; repeat: true; running: true; triggeredOnStart: true; onTriggered: root.opened ? root.refresh() : root.pollStatus() }
 
   KeyboardPanel {
     id: panel
@@ -216,6 +271,7 @@ Panel {
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
+      blocked: facecamStage.editing
       onCloseRequested: root.close()
       onTabRequested: function(direction) { root.switchPanel(direction) }
 
@@ -250,8 +306,8 @@ Panel {
 
           Rectangle {
             width: parent.width * 0.61; radius: 0
-            height: Math.max(Style.space(310), root.selectedDevice === "streamdeck"
-                             ? deckColumn.implicitHeight + Style.space(28) : 0)
+            height: Math.max(Style.space(310), root.selectedDevice === "streamdeck" ? deckColumn.implicitHeight + Style.space(28)
+                             : root.selectedDevice === "facecam" ? facecamStage.implicitHeight + Style.space(28) : 0)
             color: Qt.rgba(0, 0, 0, 0.28); border.color: Qt.rgba(1, 1, 1, 0.14)
 
             Column {
@@ -388,6 +444,16 @@ Panel {
               }
             }
 
+            FacecamStage {
+              id: facecamStage
+              visible: root.selectedDevice === "facecam"; anchors.centerIn: parent; width: parent.width - Style.space(28)
+              panel: root; camera: root.facecam; presets: root.facecamPresets
+              activePreset: root.facecam && root.facecam.activePreset ? root.facecam.activePreset : ""
+              shown: root.opened && root.selectedDevice === "facecam"
+              onCommand: function(args) { root.facecamCommand(args) }
+              onEditingDone: keyCatcher.forceActiveFocus()
+            }
+
             Column {
               visible: root.selectedDevice === "lights"; anchors.centerIn: parent; width: parent.width - Style.space(28); spacing: Style.space(12)
               Text { text: "SELECT LIGHT"; color: Color.muted; font.family: Style.font.family; font.pixelSize: 9; font.bold: true }
@@ -424,7 +490,7 @@ Panel {
             width: parent.width * 0.39 - Style.space(14); spacing: Style.space(10)
             Text { text: "ACTION INSPECTOR"; color: Color.muted; font.family: Style.font.family; font.pixelSize: 10; font.bold: true }
             Text {
-              text: root.selectedDevice === "streamdeck" ? (root.selectedControl === "key" ? "Key " + (root.selectedIndex + 1) + (root.hasPages && root.pageCount > 1 ? " · Page " + (root.editPage + 1) : "") : "Dial " + (root.selectedIndex + 1)) : root.selectedDevice === "pedal" ? ["Left pedal", "Middle pedal", "Right pedal"][root.selectedIndex] : root.selectedDevice === "wave" ? root.waveName : root.selectedLightName(); textFormat: Text.PlainText
+              text: root.selectedDevice === "streamdeck" ? (root.selectedControl === "key" ? "Key " + (root.selectedIndex + 1) + (root.hasPages && root.pageCount > 1 ? " · Page " + (root.editPage + 1) : "") : "Dial " + (root.selectedIndex + 1)) : root.selectedDevice === "pedal" ? ["Left pedal", "Middle pedal", "Right pedal"][root.selectedIndex] : root.selectedDevice === "wave" ? root.waveName : root.selectedDevice === "facecam" ? root.facecamName : root.selectedLightName(); textFormat: Text.PlainText
               color: Color.foreground; font.family: Style.font.family; font.pixelSize: 15; font.bold: true
             }
             Text { visible: root.selectedDevice === "streamdeck" || root.selectedDevice === "pedal"; width: parent.width; wrapMode: Text.WordWrap; text: "Choose an application, system function, or key. Changes apply immediately."; color: Color.muted; font.family: Style.font.family; font.pixelSize: 10 }
@@ -482,6 +548,12 @@ Panel {
                 Text { anchors.centerIn: parent; text: "USE AS DEFAULT MICROPHONE"; color: Color.foreground; font.family: Style.font.family; font.pixelSize: 9; font.bold: true }
                 MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.waveAction("default") }
               }
+            }
+            FacecamInspector {
+              visible: root.selectedDevice === "facecam"; width: parent.width
+              panel: root; camera: root.facecam
+              onSetControl: function(name, value) { root.facecamCommand(["set", name, value]) }
+              onCommand: function(args) { root.facecamCommand(args) }
             }
             Column {
               visible: root.selectedDevice === "lights"; width: parent.width; spacing: Style.space(9)

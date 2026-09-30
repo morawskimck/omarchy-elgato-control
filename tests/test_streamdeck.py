@@ -407,6 +407,7 @@ class StreamDeckNeoTests(unittest.TestCase):
         neo = self.neo(); daemon.devices = {neo["path"]: neo}
         daemon.hid.paths = lambda: [{k: v for k, v in neo.items() if k != "handle"}]
         with mock.patch.object(module, "detect_wave", return_value=None), \
+             mock.patch.object(module, "discover_facecams", return_value=[]), \
              mock.patch.object(module, "mic_muted", return_value=True) as muted:
             daemon.connect()
         muted.assert_called_once_with(None)
