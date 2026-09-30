@@ -637,7 +637,8 @@ def write_status(data):
 
 def command_for(action, wave=None):
     home = str(pathlib.Path.home())
-    mic_target = str((wave or {}).get("sourceId", "@DEFAULT_AUDIO_SOURCE@"))
+    # A Wave that PipeWire lists only as an output has no source id.
+    mic_target = str((wave or {}).get("sourceId") or "@DEFAULT_AUDIO_SOURCE@")
     if action in KEY_ACTIONS: return ["wtype", "-k", KEY_ACTIONS[action]]
     if action.startswith("app:") and desktop_file_exists(action[4:]):
         return ["uwsm-app", "--", "gtk-launch", action[4:]]
@@ -757,9 +758,11 @@ def wave_gain_raw(wave, decibels):
 
 def wave_gain_step(wave, direction):
     """Move the gain by the raw step nearest to 1 dB."""
+    # Stepping from an unread gain would start from 0 and drop it to the floor.
+    if wave.get("gainRaw") is None: raise RuntimeError("Wave gain is unavailable")
     scale = wave_scale(wave)
     step = max(1, round((scale["gainMax"] - scale["gainMin"]) / ((scale["gainDbMax"] - scale["gainDbMin"]) or 1)))
-    raw = int(wave.get("gainRaw") or 0) + direction * step
+    raw = int(wave["gainRaw"]) + direction * step
     return max(scale["gainMin"], min(scale["gainMax"], raw))
 
 def read_wave_controls(card):
