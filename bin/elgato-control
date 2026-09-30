@@ -44,6 +44,8 @@ STATE = pathlib.Path(os.environ.get("XDG_STATE_HOME", pathlib.Path.home() / ".lo
 LEGACY_CONFIG = pathlib.Path(os.environ.get("XDG_CONFIG_HOME", pathlib.Path.home() / ".config")) / "omarchy-streamdeck"
 PROFILE = CONFIG / "profile.json"
 STATUS = STATE / "status.json"
+# The active Facecam preset; each change also stamps it so the daemon re-reads the camera.
+FACECAM_STATE = STATE / "facecam.json"
 ICONS = ROOT / "assets" / "keys"
 KEY_CACHE = pathlib.Path(os.environ.get("XDG_CACHE_HOME", pathlib.Path.home() / ".cache")) / "elgato-control" / "keys"
 KEY_ACTIONS = {
@@ -66,6 +68,9 @@ BUILTIN_ACTIONS = [
     ("wave_headphone_up", "Wave Headphones Up"), ("wave_headphone_mute", "Wave Headphones Mute"),
     ("wave_preset_quiet", "Wave Preset · Quiet Room"), ("wave_preset_normal", "Wave Preset · Normal"),
     ("wave_preset_loud", "Wave Preset · Loud Environment"),
+    ("facecam_privacy", "Facecam Privacy"), ("facecam_zoom_in", "Facecam Zoom In"),
+    ("facecam_zoom_out", "Facecam Zoom Out"), ("facecam_autofocus", "Facecam Autofocus"),
+    ("facecam_reset", "Facecam Reset Picture"), ("facecam_preset_next", "Facecam Next Preset"),
     ("page_prev", "Previous Page"), ("page_next", "Next Page"),
 ]
 TOUCH_COLOR = [180, 180, 180]
@@ -492,15 +497,24 @@ def action_icon(action):
     if built_in.is_file(): return str(built_in)
     if action.startswith("app:"):
         return resolve_icon(desktop_entry(action[4:]).get("Icon", ""))
+    # A preset key shows the preset glyph over its own name, like an application key.
+    if action.startswith("facecam_preset:"): return str(ICONS / "facecam_preset.png")
     return ""
 
 def action_catalog():
     options = [{"value": action, "label": "Function · " + label, "icon": action_icon(action)} for action, label in BUILTIN_ACTIONS]
+    options.extend(facecam_preset_options())
     options.extend({"value": action, "label": "Key · " + action_label(action), "icon": action_icon(action)} for action in KEY_ACTIONS)
     options.extend({"value": "app:" + desktop_id, "label": "Application · " + plain_text(name),
                     "icon": action_icon("app:" + desktop_id)}
                    for desktop_id, name in desktop_applications())
     return options
+
+def facecam_preset_options():
+    try: presets = facecam_presets(load_profile())
+    except (OSError, ValueError): presets = []
+    return [{"value": "facecam_preset:" + preset["name"], "label": "Function · Facecam Preset · " + preset["name"],
+             "icon": action_icon("facecam_preset:" + preset["name"])} for preset in presets]
 
 # Panel firmware decodes 3-component baseline JPEG only; ImageMagick would
 # otherwise emit a 1-channel grayscale file for monochrome artwork.
@@ -620,6 +634,8 @@ def desktop_file_exists(desktop_id):
 
 def valid_action(action):
     if action in KEY_ACTIONS or any(action == item[0] for item in BUILTIN_ACTIONS): return True
+    if action.startswith("facecam_preset:"):
+        return find_facecam_preset(load_profile(), action.split(":", 1)[1]) is not None
     return action.startswith("app:") and desktop_file_exists(action[4:])
 
 def set_control_action(kind, index, slot, action, page=0):
@@ -638,6 +654,7 @@ def set_pedal_action(index, action):
 
 def action_label(action):
     if action == "voxtype_push_to_talk": return "VOXtype push-to-talk"
+    if action.startswith("facecam_preset:"): return plain_text(action.split(":", 1)[1])
     if action in KEY_ACTIONS: return KEY_ACTIONS[action].replace("_", " ")
     if action.startswith("app:"):
         return dict(desktop_applications()).get(action[4:], action[4:])
@@ -821,6 +838,364 @@ def perform_wave_action(wave, action):
     elif action == "wave_default": set_default_wave_source(wave.get("sourceId"))
     else: raise RuntimeError("Unknown Wave action: " + action)
 
+# Elgato cameras are plain UVC devices: their settings are the standard V4L2
+# controls, read and written with v4l2-ctl, and sysfs tells which node belongs
+# to which camera and whether it is streaming.
+VIDEO_SYSFS = pathlib.Path("/sys/class/video4linux")
+PROC = pathlib.Path("/proc")
+FACECAM_GROUPS = (("exposure", "Exposure"), ("color", "Color"), ("lens", "Lens"), ("image", "Image"))
+# name -> (inspector group, label), in the inspector's order.
+FACECAM_CONTROLS = {
+    "auto_exposure": ("exposure", "Auto exposure"), "exposure_time_absolute": ("exposure", "Exposure time"),
+    "gain": ("exposure", "Gain"), "exposure_dynamic_framerate": ("exposure", "Low-light frame rate"),
+    "power_line_frequency": ("exposure", "Anti-flicker"), "backlight_compensation": ("exposure", "Backlight compensation"),
+    "white_balance_automatic": ("color", "Auto white balance"), "white_balance_temperature": ("color", "Temperature"),
+    "saturation": ("color", "Saturation"),
+    "focus_automatic_continuous": ("lens", "Autofocus"), "focus_absolute": ("lens", "Focus"),
+    "zoom_absolute": ("lens", "Zoom"), "pan_absolute": ("lens", "Pan"), "tilt_absolute": ("lens", "Tilt"),
+    "brightness": ("image", "Brightness"), "contrast": ("image", "Contrast"), "sharpness": ("image", "Sharpness"),
+}
+# (scale, unit, decimals) from raw to shown values: exposure counts 100 µs
+# steps, zoom hundredths, and pan and tilt arc seconds.
+FACECAM_UNITS = {"exposure_time_absolute": (0.1, " ms", 1), "white_balance_temperature": (1, " K", 0),
+                 "zoom_absolute": (0.01, "×", 2), "pan_absolute": (1 / 3600, "°", 0), "tilt_absolute": (1 / 3600, "°", 0)}
+# Controls whose slider is logarithmic: exposure spans 0.1-250 ms, and the
+# useful range sits at the bottom of it.
+FACECAM_LOG_CONTROLS = {"exposure_time_absolute"}
+FACECAM_MENU_LABELS = {"Manual Mode": "Manual", "Aperture Priority Mode": "Auto", "Auto Mode": "Auto",
+                       "Shutter Priority Mode": "Shutter", "Disabled": "Off"}
+V4L2_CONTROL = re.compile(r"^\s*(\w+) 0x[0-9a-f]+ \((\w+)\)\s*:\s*(.*)$")
+V4L2_MENU_ITEM = re.compile(r"^\t+(-?\d+): (.+)$")
+
+def parse_v4l2_controls(text):
+    """Parse `v4l2-ctl --list-ctrls-menus` into {name: control}."""
+    controls, current = {}, None
+    for line in text.splitlines():
+        match = V4L2_CONTROL.match(line)
+        if match:
+            name, kind, rest = match.groups()
+            flags = re.search(r"flags=(.*)$", rest)
+            current = controls[name] = {"type": kind, "menu": [],
+                                        "flags": [flag.strip() for flag in flags.group(1).split(",")] if flags else []}
+            current.update((key, int(value)) for key, value in re.findall(r"(\w+)=(-?\d+)", rest))
+            continue
+        item = V4L2_MENU_ITEM.match(line)
+        if item and current is not None and current["type"] == "menu":
+            current["menu"].append({"value": int(item.group(1)), "label": item.group(2).strip()})
+        elif line.strip(): current = None
+    return controls
+
+def facecam_controls(parsed):
+    """The controls the Facecam page knows, described for the panel."""
+    controls = {}
+    for name in list(FACECAM_CONTROLS) + ["privacy"]:
+        raw = parsed.get(name)
+        if not raw or "value" not in raw: continue
+        group, label = FACECAM_CONTROLS.get(name, ("", "Privacy"))
+        if raw["type"] == "menu": kind = "choice"
+        elif raw["type"] == "bool" or (raw.get("min"), raw.get("max")) == (0, 1): kind = "toggle"
+        else: kind = "range"
+        scale, unit, decimals = FACECAM_UNITS.get(name, (1, "", 0))
+        controls[name] = {
+            "name": name, "label": label, "group": group, "kind": kind,
+            "value": raw["value"], "default": raw.get("default", raw["value"]),
+            "min": raw.get("min", 0), "max": raw.get("max", 1), "step": max(1, raw.get("step", 1)),
+            "menu": [{"value": item["value"], "label": FACECAM_MENU_LABELS.get(item["label"], item["label"])}
+                     for item in raw["menu"]],
+            "inactive": "inactive" in raw["flags"], "readOnly": "read-only" in raw["flags"],
+            "scale": scale, "unit": unit, "decimals": decimals,
+            "curve": "log" if name in FACECAM_LOG_CONTROLS and raw.get("min", 0) > 0 else "linear"}
+    return controls
+
+def facecam_groups(controls):
+    groups = [{"id": group, "label": label,
+               "controls": [name for name, (owner, _label) in FACECAM_CONTROLS.items() if owner == group and name in controls]}
+              for group, label in FACECAM_GROUPS]
+    return [group for group in groups if group["controls"]]
+
+def read_sysfs(path, fallback=None):
+    try: return path.read_text().strip()
+    except OSError: return fallback
+
+def discover_facecams():
+    """Elgato Facecam capture nodes, in node order."""
+    def number(entry): return int(entry.name[5:]) if entry.name[5:].isdigit() else 1 << 30
+    cameras = []
+    for entry in sorted(VIDEO_SYSFS.glob("video*"), key=number):
+        # uvcvideo gives each camera a capture node (index 0) and a metadata node.
+        if read_sysfs(entry / "index") != "0": continue
+        usb = (entry / "device").resolve().parent
+        try: vendor, product_id = int(read_sysfs(usb / "idVendor", ""), 16), int(read_sysfs(usb / "idProduct", ""), 16)
+        except ValueError: continue
+        product = read_sysfs(usb / "product", "")
+        if vendor != VID or "facecam" not in product.lower(): continue
+        cameras.append({"device": "/dev/" + entry.name, "product": plain_text(product),
+                        "label": plain_text(re.sub(r"^Elgato\s+", "", product)), "productId": product_id,
+                        "serial": read_sysfs(usb / "serial", ""), "devnum": read_sysfs(usb / "devnum", ""), "usb": str(usb)})
+    return cameras
+
+def camera_streaming(camera):
+    """uvcvideo gives the video streaming interface a non-zero alternate
+    setting, and with it USB bandwidth, only while the camera streams."""
+    if not camera.get("usb"): return False
+    usb = pathlib.Path(camera["usb"])
+    for interface in usb.glob(usb.name + ":*"):
+        if ((read_sysfs(interface / "bInterfaceClass"), read_sysfs(interface / "bInterfaceSubClass")) == ("0e", "02")
+                and read_sysfs(interface / "bAlternateSetting", "0") != "0"): return True
+    return False
+
+def program_name(entry):
+    try: fields = [field.decode(errors="replace") for field in (entry / "cmdline").read_bytes().split(b"\0") if field]
+    except OSError: fields = []
+    # Chrome rewrites its helpers' titles into a single space-separated field.
+    program = fields[0].split()[0] if len(fields) == 1 and fields[0].split() else fields[0] if fields else ""
+    name = os.path.basename(program) or read_sysfs(entry / "comm", "")
+    return name[:1].upper() + name[1:]
+
+def camera_users(device, pids=None):
+    """{pid: program} for the processes holding the camera node open, among
+    `pids` when given. A v4l2-ctl query does not count: it only reads or
+    writes controls."""
+    users = {}
+    for entry in PROC.iterdir() if pids is None else (PROC / str(pid) for pid in pids):
+        if not entry.name.isdigit() or int(entry.name) == os.getpid(): continue
+        try: fds = list((entry / "fd").iterdir())
+        except OSError: continue
+        for fd in fds:
+            try: target = os.readlink(fd)
+            except OSError: continue
+            if target != device: continue
+            name = program_name(entry)
+            if name.lower() != "v4l2-ctl": users[int(entry.name)] = plain_text(name)
+            break
+    return users
+
+# A manual control takes effect only while its automatic twin holds the manual value.
+FACECAM_AUTO = {"exposure_time_absolute": ("auto_exposure", 1),
+                "white_balance_temperature": ("white_balance_automatic", 0),
+                "focus_absolute": ("focus_automatic_continuous", 0)}
+FACECAM_ZOOM_STEP = 25  # 0.25×
+FACECAM_READ_INTERVAL = 10
+# Which app streams changes only when streaming stops and starts again, so a
+# stream that goes on is rescanned rarely: the scan costs tens of milliseconds.
+FACECAM_SCAN_INTERVAL = 30
+
+def facecam_write_plan(controls, desired):
+    """Batches of (control, value), automatic modes first so each manual value
+    lands after the mode that lets it take effect. A manual value its
+    automatic mode leaves inactive is skipped: the camera may refuse it."""
+    autos = {auto for auto, _manual in FACECAM_AUTO.values()}
+    writable = [name for name in list(FACECAM_CONTROLS) + ["privacy"]
+                if name in desired and name in controls and not controls[name].get("readOnly")]
+    values = []
+    for name in writable:
+        if name in autos: continue
+        if name in FACECAM_AUTO:
+            auto, manual = FACECAM_AUTO[name]
+            if auto in controls and desired.get(auto, controls[auto]["value"]) != manual: continue
+        values.append((name, desired[name]))
+    return [batch for batch in ([(name, desired[name]) for name in writable if name in autos], values) if batch]
+
+def run_v4l2(device, arguments):
+    result = subprocess.run(["v4l2-ctl", "-d", device] + arguments, capture_output=True, text=True, timeout=3)
+    if result.returncode != 0: raise RuntimeError(result.stderr.strip() or "v4l2-ctl failed")
+    return result.stdout
+
+def write_facecam_controls(camera, desired):
+    """Write `desired`; a batch the camera refuses is retried one control at a
+    time, so the controls it accepts still apply."""
+    failed = []
+    for batch in facecam_write_plan(camera.get("controls") or {}, desired):
+        try: run_v4l2(camera["device"], ["-c", ",".join("%s=%d" % item for item in batch)]); continue
+        except RuntimeError:
+            if len(batch) == 1: failed.append(batch[0][0]); continue
+        for item in batch:
+            try: run_v4l2(camera["device"], ["-c", "%s=%d" % item])
+            except RuntimeError: failed.append(item[0])
+    if failed: raise RuntimeError("The camera refused " + ", ".join(failed))
+
+def facecam_value(controls, name, value):
+    """Check a value for a control, clamping a range to the camera's limits and step."""
+    control = controls.get(name)
+    if not control or control.get("readOnly"): raise ValueError("Unsupported Facecam control: " + plain_text(name))
+    value = int(value)
+    if control["kind"] == "choice":
+        if value not in [item["value"] for item in control["menu"]]: raise ValueError("Unsupported value for " + name)
+        return value
+    if control["kind"] == "toggle":
+        if value not in (0, 1): raise ValueError("Unsupported value for " + name)
+        return value
+    low, high, step = control["min"], control["max"], control["step"]
+    return min(high, low + int((max(low, min(high, value)) - low) / step + 0.5) * step)
+
+def facecam_action_values(camera, action):
+    """The control values a Facecam function writes."""
+    if not camera: raise RuntimeError("Facecam is not connected")
+    controls = camera.get("controls") or {}
+    def control(name, description):
+        if name not in controls: raise RuntimeError("This camera has no " + description)
+        return controls[name]
+    if action == "facecam_privacy": return {"privacy": 0 if control("privacy", "privacy switch")["value"] else 1}
+    if action in ("facecam_zoom_in", "facecam_zoom_out"):
+        zoom = control("zoom_absolute", "zoom")
+        step = FACECAM_ZOOM_STEP if action == "facecam_zoom_in" else -FACECAM_ZOOM_STEP
+        return {"zoom_absolute": max(zoom["min"], min(zoom["max"], zoom["value"] + step))}
+    if action == "facecam_autofocus":
+        return {"focus_automatic_continuous": 0 if control("focus_automatic_continuous", "autofocus")["value"] else 1}
+    # Privacy stays as it is: a reset must not show a camera that was hidden.
+    if action == "facecam_reset":
+        return {name: value["default"] for name, value in controls.items() if name in FACECAM_CONTROLS and not value.get("readOnly")}
+    raise RuntimeError("Unknown Facecam action: " + action)
+
+PRESET_NAME_LIMIT = 24
+
+def load_facecam_state():
+    try: state = json.loads(FACECAM_STATE.read_text())
+    except (OSError, ValueError): return {}
+    return state if isinstance(state, dict) else {}
+
+def save_facecam_state(**changes):
+    state = load_facecam_state()
+    state.update(changes, changedAt=time.time())
+    FACECAM_STATE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = FACECAM_STATE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(state) + "\n")
+    os.replace(tmp, FACECAM_STATE)
+
+def clean_preset_name(name):
+    """Collapse spacing; refuse control characters and markup, which labels would carry."""
+    name = str(name)
+    if not name.isprintable() or "<" in name or ">" in name: raise ValueError("Preset names are plain text")
+    name = " ".join(name.split())
+    if not 0 < len(name) <= PRESET_NAME_LIMIT: raise ValueError("Preset names are 1-%d characters" % PRESET_NAME_LIMIT)
+    return name
+
+def facecam_presets(profile):
+    """Saved presets; hand-edited entries of the wrong shape are left out."""
+    settings = profile.get("facecam")
+    presets = settings.get("presets") if isinstance(settings, dict) else None
+    def valid(preset):
+        if not isinstance(preset, dict) or not isinstance(preset.get("controls"), dict): return False
+        try: return clean_preset_name(preset.get("name", "")) == preset["name"]
+        except ValueError: return False
+    return [preset for preset in presets if valid(preset)] if isinstance(presets, list) else []
+
+def find_facecam_preset(profile, name):
+    key = " ".join(str(name).split()).casefold()
+    return next((preset for preset in facecam_presets(profile) if preset["name"].casefold() == key), None)
+
+def save_facecam_preset(camera, name):
+    """Save the camera's picture settings as a preset, replacing one of the same name."""
+    name = clean_preset_name(name)
+    if not camera: raise RuntimeError("Facecam is not connected")
+    snapshot = {key: control["value"] for key, control in (camera.get("controls") or {}).items()
+                if key in FACECAM_CONTROLS and not control.get("readOnly")}
+    profile = load_profile()
+    if not isinstance(profile.get("facecam"), dict): profile["facecam"] = {}
+    if not isinstance(profile["facecam"].get("presets"), list): profile["facecam"]["presets"] = []
+    existing = find_facecam_preset(profile, name)
+    if existing: existing.update(name=name, controls=snapshot)
+    else: profile["facecam"]["presets"].append({"name": name, "controls": snapshot})
+    save_profile(profile)
+    save_facecam_state(activePreset=name)
+    return name
+
+def delete_facecam_preset(name):
+    profile = load_profile()
+    preset = find_facecam_preset(profile, name)
+    if not preset: raise ValueError("No Facecam preset named " + plain_text(name))
+    profile["facecam"]["presets"].remove(preset)
+    save_profile(profile)
+    if str(load_facecam_state().get("activePreset") or "").casefold() == preset["name"].casefold():
+        save_facecam_state(activePreset=None)
+
+def apply_facecam_preset(camera, name):
+    preset = find_facecam_preset(load_profile(), name)
+    if not preset: raise RuntimeError("No Facecam preset named " + plain_text(name))
+    controls = camera.get("controls") or {}
+    desired = {}
+    # Presets are hand-editable: keep the values this camera accepts.
+    for key, value in preset["controls"].items():
+        if key not in FACECAM_CONTROLS: continue
+        try: desired[key] = facecam_value(controls, key, value)
+        except (TypeError, ValueError): continue
+    try: write_facecam_controls(camera, desired)
+    finally: save_facecam_state(activePreset=preset["name"])
+
+def next_facecam_preset(camera):
+    presets = facecam_presets(load_profile())
+    if not presets: raise RuntimeError("No Facecam presets are saved")
+    names = [preset["name"].casefold() for preset in presets]
+    active = str(load_facecam_state().get("activePreset") or "").casefold()
+    apply_facecam_preset(camera, presets[(names.index(active) + 1) % len(names) if active in names else 0]["name"])
+
+def perform_facecam_action(camera, action):
+    if not camera: raise RuntimeError("Facecam is not connected")
+    if action.startswith("facecam_preset:"): return apply_facecam_preset(camera, action.split(":", 1)[1])
+    if action == "facecam_preset_next": return next_facecam_preset(camera)
+    values = facecam_action_values(camera, action)
+    # Privacy hides the picture without changing it, so the active preset still describes it.
+    try: write_facecam_controls(camera, values)
+    finally: save_facecam_state(**({} if action == "facecam_privacy" else {"activePreset": None}))
+
+def set_facecam_control(camera, name, value):
+    if not camera: raise RuntimeError("Facecam is not connected")
+    value = facecam_value(camera.get("controls") or {}, name, value)
+    try: write_facecam_controls(camera, {name: value})
+    finally: save_facecam_state(**({} if name == "privacy" else {"activePreset": None}))
+
+def read_facecam_controls(device):
+    return facecam_controls(parse_v4l2_controls(run_v4l2(device, ["--list-ctrls-menus"])))
+
+def facecam_record(camera, presence=None):
+    """The camera as the status file and the panel see it. An empty
+    `presence` skips working out who streams."""
+    record = dict(camera, kind="camera", connected=True, capabilities=["camera", "privacy", "presets"], error="")
+    try: record["controls"] = read_facecam_controls(camera["device"])
+    except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+        record["controls"], record["error"] = {}, plain_text(error)
+    record.update(facecam_presence(camera) if presence is None else presence)
+    record.update(groups=facecam_groups(record["controls"]), controlsReadAt=time.time(),
+                  privacy=bool(record["controls"].get("privacy", {}).get("value")),
+                  activePreset=load_facecam_state().get("activePreset"))
+    return record
+
+def detect_facecam(presence=True):
+    cameras = discover_facecams()
+    return facecam_record(cameras[0], None if presence else {}) if cameras else None
+
+FACECAM_COMMANDS = {"privacy": "facecam_privacy", "zoom-in": "facecam_zoom_in", "zoom-out": "facecam_zoom_out",
+                    "autofocus": "facecam_autofocus", "reset": "facecam_reset", "next-preset": "facecam_preset_next"}
+
+def facecam_command(command, arguments):
+    """Run a `facecam` CLI command and return the camera afterwards. Only
+    `status` works out who streams: the panel reads that from the daemon."""
+    expected = {"set": 2, "save-preset": 1, "apply-preset": 1, "delete-preset": 1}.get(command, 0)
+    if len(arguments) != expected: raise ValueError("facecam %s takes %d argument(s)" % (command, expected))
+    if command == "status": return detect_facecam()
+    if command == "delete-preset":
+        delete_facecam_preset(arguments[0])
+        return detect_facecam(presence=False)
+    camera = detect_facecam(presence=False)
+    if command == "set": set_facecam_control(camera, arguments[0], int(arguments[1]))
+    elif command == "save-preset": save_facecam_preset(camera, arguments[0])
+    elif command == "apply-preset": perform_facecam_action(camera, "facecam_preset:" + arguments[0])
+    else: perform_facecam_action(camera, FACECAM_COMMANDS[command])
+    return detect_facecam(presence=False)
+
+def facecam_presence(camera):
+    """Whether the camera streams, and whether that is another app or the panel's preview."""
+    streaming = camera_streaming(camera)
+    users = camera_users(camera["device"]) if streaming else {}
+    # The shell hosts the preview: it is this helper's parent when the shell
+    # runs it, and is known by name when the daemon was started some other way.
+    shell = os.getppid()
+    ours = {pid for pid, name in users.items() if pid == shell or name.lower() in ("quickshell", "qs")}
+    apps = sorted({name for pid, name in users.items() if pid not in ours})
+    preview = streaming and bool(ours) and not apps
+    return {"streaming": streaming, "live": streaming and not preview, "preview": preview, "apps": apps,
+            "holders": sorted(users)}
+
 def lcd_svg(profile, brightness, light_states):
     """Build a dependency-light dial strip; ImageMagick converts it to JPEG."""
     dials = list(profile.get("dials", []))[:4]
@@ -857,11 +1232,20 @@ def svg_text(x, y, value, size, color, weight="normal", anchor="start"):
     return ('<text x="%d" y="%d" fill="%s" font-size="%d" font-family="sans-serif" font-weight="%s" '
             'text-anchor="%s">%s</text>' % (x, y, color, size, weight, anchor, escape(str(value))))
 
-def neo_screen_svg(now, page, pages, mic_muted, lights):
+def facecam_screen_state(camera):
+    """What the info screen says about the camera: privacy, live in an app, or nothing."""
+    if not camera: return None
+    if camera.get("privacy"): return "private"
+    return "live" if camera.get("live") else None
+
+def neo_screen_svg(now, page, pages, mic_muted, lights, camera=None):
     """The Stream Deck Neo info screen: clock and date, then page and status lines."""
     parts = [svg_text(8, 33, time.strftime("%H:%M", now), 28, "#f8fafc", "bold"),
              svg_text(9, 51, time.strftime("%a %d %b", now), 12, "#94a3b8")]
     status = []
+    # The camera leads: what others can see matters most, and three lines fit.
+    if camera == "private": status.append(("CAM PRIVATE", "#38bdf8"))
+    elif camera == "live": status.append(("CAM LIVE", "#f87171"))
     if pages > 1: status.append(("PAGE %d/%d" % (page + 1, pages), "#f8fafc"))
     if mic_muted: status.append(("MIC MUTED", "#f87171"))
     reachable = [light for light in lights if light.get("reachable")]
@@ -875,6 +1259,11 @@ def neo_screen_svg(now, page, pages, mic_muted, lights):
             '<rect width="248" height="58" fill="#000000"/>%s</svg>' % "".join(parts))
 
 class Daemon:
+    # Facecam tracking, as class defaults so a partly built daemon has them too.
+    facecam_identity = facecam_stamp = facecam_presence_cache = None
+    facecam_read_at = facecam_scanned_at = 0.0
+    facecam_restore_pending = False
+
     def __init__(self):
         self.hid, self.devices, self.previous = Hid(), {}, {}
         self.profile, self.mtime = load_profile(), PROFILE.stat().st_mtime
@@ -887,12 +1276,17 @@ class Daemon:
         self.running = True
         self.status = {"running": True, "profile": self.profile.get("name", "Default"), "plus": None, "deck": None, "pedal": None,
                        "page": 0, "pages": page_count(self.profile),
-                       "wave": None, "lights": [], "devices": [], "recentReports": {},
+                       "wave": None, "facecam": None, "lights": [], "devices": [], "recentReports": {},
                        "lastAction": "", "lastEvent": "", "error": "", "updatedAt": int(time.time())}
+
+    def key_artwork(self, action):
+        """The artwork a key shows: functions with an on state show it."""
+        if action == "facecam_privacy" and (self.status.get("facecam") or {}).get("privacy"): return "facecam_privacy_on"
+        return action
 
     def key_image(self, dev, index, key, spec):
         action = key.get("action", "")
-        path = rendered_key_image(action, key.get("label", action_label(action)), key.get("color", [42, 54, 72]),
+        path = rendered_key_image(self.key_artwork(action), key.get("label", action_label(action)), key.get("color", [42, 54, 72]),
                                   size=spec.get("keySize", 120), flip=spec.get("flip", False))
         if not path or not path.exists(): return
         self.write_paged(dev, 0x07, index, path.read_bytes())
@@ -965,10 +1359,11 @@ class Daemon:
         pages = page_count(self.profile)
         lights = [{key: light.get(key) for key in ("reachable", "on", "brightness")} for light in self.light_states]
         muted = bool(self.status.get("micMuted"))
-        signature = json.dumps([time.strftime("%Y%m%d%H%M", now), self.page, pages, muted, lights])
+        camera = facecam_screen_state(self.status.get("facecam"))
+        signature = json.dumps([time.strftime("%Y%m%d%H%M", now), self.page, pages, muted, lights, camera])
         if not force and signature == device.get("screenSignature"): return
         try:
-            data = render_svg_jpeg(neo_screen_svg(now, self.page, pages, muted, lights),
+            data = render_svg_jpeg(neo_screen_svg(now, self.page, pages, muted, lights, camera),
                                    rotate=device_spec(device["productId"]).get("flip", False))
             self.write_window(device["handle"], data)
             device["screenSignature"] = signature
@@ -1013,7 +1408,8 @@ class Daemon:
                                   ("product", "serial", "path", "kind", "label", "keys", "columns", "capabilities")}
                                  if value else None)
         self.status["wave"] = detect_wave()
-        devices = [self.status[x] for x in ("plus", "deck", "pedal", "wave") if self.status.get(x)]
+        self.refresh_facecam()
+        devices = [self.status[x] for x in ("plus", "deck", "pedal", "wave", "facecam") if self.status.get(x)]
         if self.status.get("lights"):
             devices.append({"product": "Elgato Key Lights", "kind": "lights", "connected": True,
                             "capabilities": ["lights", "power", "brightness", "temperature"],
@@ -1041,6 +1437,14 @@ class Daemon:
                 self.status["wave"] = detect_wave()
                 self.status["error"] = ""
             except (OSError, RuntimeError, subprocess.SubprocessError) as e: self.status["error"] = "Wave: " + str(e)
+        elif action.startswith("facecam_"):
+            # Start from the camera as it is: another app may have changed it since the last poll.
+            self.refresh_facecam(force=True)
+            try:
+                perform_facecam_action(self.status.get("facecam"), action)
+                self.status["error"] = ""
+            except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as e: self.status["error"] = "Facecam: " + str(e)
+            self.refresh_facecam(force=True)
         elif action.startswith("lights_"):
             self.act_lights(action)
         elif action in ("page_next", "page_prev"):
@@ -1065,6 +1469,58 @@ class Daemon:
         try: subprocess.Popen(cmd, start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except OSError as e: self.status["error"] = str(e)
         self.status["lastAction"] = action + " release"; self.status["lastEvent"] = time.strftime("%H:%M:%S")
+
+    def facecam_state(self, camera):
+        """facecam_presence, scanning every process only when streaming
+        starts, when a process it found lets go of the camera, and every
+        FACECAM_SCAN_INTERVAL seconds while the stream goes on."""
+        now = time.monotonic()
+        cached = self.facecam_presence_cache
+        if (cached and cached["streaming"] and now - self.facecam_scanned_at < FACECAM_SCAN_INTERVAL
+                and camera_streaming(camera)
+                # The preview can hand the camera to a call between two polls.
+                and len(camera_users(camera["device"], pids=cached["holders"])) == len(cached["holders"])): return cached
+        self.facecam_presence_cache, self.facecam_scanned_at = facecam_presence(camera), now
+        return self.facecam_presence_cache
+
+    def refresh_facecam(self, force=False):
+        """Presence on every call; controls when the camera (re)connects, when
+        the panel stamps a change, when forced after an action, and every 10 s."""
+        camera = next(iter(discover_facecams()), None)
+        previous = self.status.get("facecam") or {}
+        stamp = load_facecam_state().get("changedAt")
+        if camera is None:
+            self.status["facecam"] = self.facecam_identity = self.facecam_presence_cache = None
+            self.facecam_stamp = stamp
+            # A Privacy key must not keep showing privacy for a camera that is gone.
+            if previous.get("privacy"): self.redraw_decks()
+            return
+        identity = (camera["device"], camera.get("serial"), camera.get("devnum"))
+        fresh = identity != self.facecam_identity
+        if fresh: self.facecam_presence_cache, self.facecam_restore_pending = None, True
+        presence = self.facecam_state(camera)
+        now = time.monotonic()
+        # A camera that could not be read (just plugged in, before udev opens
+        # its node to the user) is read again at the next poll.
+        if (fresh or force or stamp != self.facecam_stamp or not previous.get("controls")
+                or now - self.facecam_read_at > FACECAM_READ_INTERVAL):
+            record = facecam_record(camera, presence)
+            self.facecam_read_at, self.facecam_stamp = now, stamp
+        else: record = dict(previous, **presence)
+        self.status["facecam"], self.facecam_identity = record, identity
+        if self.facecam_restore_pending and record.get("controls"):
+            self.facecam_restore_pending = False
+            self.restore_facecam_preset(record)
+        if bool(record.get("privacy")) != bool(previous.get("privacy")): self.redraw_decks()
+
+    def restore_facecam_preset(self, camera):
+        """Put the active preset back on a camera that just connected, in case
+        it came back with other settings. The write stamps the state, so the
+        next poll reads the result."""
+        active = load_facecam_state().get("activePreset")
+        if not active or not find_facecam_preset(self.profile, active): return
+        try: apply_facecam_preset(camera, active)
+        except (OSError, RuntimeError, subprocess.SubprocessError) as e: self.status["error"] = "Facecam: " + str(e)
 
     def light_sources(self):
         """USB lights, then the configured or mDNS-discovered network lights."""
@@ -1163,10 +1619,14 @@ class Daemon:
         return [d for d in self.devices.values() if "screen" in device_spec(d["productId"]).get("capabilities", [])]
 
     def loop(self):
-        last_connect = last_status = last_lights = last_screen = 0
+        last_connect = last_status = last_lights = last_screen = last_facecam = 0
         while self.running:
             now = time.monotonic()
             if now - last_connect > 2: self.connect(); last_connect = now
+            # A change from the panel shows on keys and the info screen without waiting for the poll.
+            if now - last_facecam > .25:
+                if load_facecam_state().get("changedAt") != self.facecam_stamp: self.refresh_facecam()
+                last_facecam = now
             if now - last_lights > 5: self.refresh_lights(); last_lights = now
             try:
                 mtime = PROFILE.stat().st_mtime
@@ -1201,6 +1661,7 @@ def main():
     sub.add_parser("add-page"); remove = sub.add_parser("remove-page"); remove.add_argument("page", type=int)
     dial = sub.add_parser("set-dial"); dial.add_argument("index", type=int, choices=range(1, 5)); dial.add_argument("slot", choices=("left", "press", "right")); dial.add_argument("action")
     wave = sub.add_parser("wave"); wave.add_argument("action", choices=("gain-up", "gain-down", "mute", "headphone-up", "headphone-down", "headphone-mute", "preset-quiet", "preset-normal", "preset-loud", "default"))
+    facecam = sub.add_parser("facecam"); facecam.add_argument("action", choices=["status", "set", "save-preset", "apply-preset", "delete-preset"] + list(FACECAM_COMMANDS)); facecam.add_argument("arguments", nargs="*")
     lights = sub.add_parser("lights"); lights.add_argument("action", choices=("on", "off", "toggle", "brightness", "temperature", "refresh")); lights.add_argument("--target", default="all"); lights.add_argument("--value", type=int)
     status = sub.add_parser("status"); status.add_argument("--json", action="store_true")
     args = p.parse_args(); ensure_profile()
@@ -1233,6 +1694,10 @@ def main():
         try: perform_wave_action(current, mapping[args.action])
         except (OSError, RuntimeError, subprocess.SubprocessError) as error: p.error(str(error))
         print(json.dumps(detect_wave())); return
+    if args.command == "facecam":
+        try: print(json.dumps(facecam_command(args.action, args.arguments)))
+        except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error: p.error(str(error))
+        return
     if args.command == "lights":
         try:
             result = light_states(available_lights()) if args.action == "refresh" else control_lights(args.target, args.action, args.value)
