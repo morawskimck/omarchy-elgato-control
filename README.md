@@ -204,6 +204,31 @@ or Pedal can control Wave gain, mute, headphones, or presets. Vendor-only
 features such as Clipguard and low-cut filters remain out of scope until their
 USB protocol can be implemented and tested safely.
 
+## Troubleshooting
+
+### A webcam stops working after connecting a Stream Deck or Key Light
+
+Every device behind a USB 2.0 hub, including the hubs built into monitors,
+shares that hub's bandwidth for periodic transfers. Stream Deck panels and
+USB Key Light Neos reserve their share as soon as they are plugged in, whether
+or not the plugin is running, and a webcam asks for a large share when it
+starts streaming. A Stream Deck Neo (1.5 KB per 125 µs microframe), a Key
+Light Neo (1 KB), and a Facecam Neo (3 KB) do not fit behind one hub: every
+video application fails to start the camera, and lowering the resolution does
+not help because the camera asks for the same bandwidth at every size.
+
+The kernel log names the camera when an application tries to open it:
+
+```bash
+journalctl -k | grep 'Not enough bandwidth'
+```
+
+`v4l2-ctl` reports the same failure as `VIDIOC_STREAMON returned -1 (No space
+left on device)`. `lsusb -t` shows which devices share a hub. Stopping the
+plugin does not release the bandwidth; move the camera, or the Stream Deck or
+Key Light, to a port that does not go through the same hub, such as a port on
+the computer or on a second monitor.
+
 ## Development diagnostics
 
 The daemon records only the latest raw HID report shape for each connected
