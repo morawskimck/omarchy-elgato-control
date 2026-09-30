@@ -97,7 +97,7 @@ Panel {
     pageProc.running = true
   }
   function actionName(value) {
-    for (var i = 0; i < actionOptions.length; i++) if (actionOptions[i].value === value) return actionOptions[i].label.replace(/^(Function|Application|Key) · /, "")
+    for (var i = 0; i < actionOptions.length; i++) if (actionOptions[i].value === value) return actionOptions[i].label.replace(/^(Function|Application|Key|Command) · /, "")
     return value || "Unassigned"
   }
   function actionIcon(value) {

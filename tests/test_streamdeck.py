@@ -55,6 +55,10 @@ class DeviceModelTests(unittest.TestCase):
         self.assertEqual(["voxtype", "record", "start"], module.command_for("voxtype_push_to_talk"))
         self.assertEqual(["voxtype", "record", "stop"], module.release_command_for("voxtype_push_to_talk"))
 
+    def test_panel_names_commands_without_their_catalog_prefix(self):
+        panel = (pathlib.Path(__file__).parents[1] / "Panel.qml").read_text()
+        self.assertIn(".label.replace(/^(Function|Application|Key|Command) · /, \"\")", panel)
+
     def test_desktop_application_launch_is_validated_and_uses_argv(self):
         with mock.patch.object(module, "desktop_file_exists", return_value=True):
             self.assertEqual(["uwsm-app", "--", "gtk-launch", "example.App"],
@@ -521,6 +525,61 @@ class PageProfileTests(unittest.TestCase):
         profile = {"keys": [], "pages": [{"keys": []}]}
         self.assertTrue(module.ensure_key_slots(profile, 8))
         self.assertEqual([8, 8], [len(profile["keys"]), len(profile["pages"][0]["keys"])])
+
+
+class CustomCommandTests(unittest.TestCase):
+    RECORD = {"name": "Record fast", "command": ["~/bin/record", "-x", "--out", "~/Recordings"]}
+
+    def with_profile(self, profile):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        config = pathlib.Path(directory.name)
+        path = config / "profile.json"
+        path.write_text(module.json.dumps(profile))
+        for name, value in (("CONFIG", config), ("PROFILE", path)):
+            patcher = mock.patch.object(module, name, value); patcher.start(); self.addCleanup(patcher.stop)
+        return path
+
+    def test_command_runs_its_argv_with_home_expanded(self):
+        home = str(pathlib.Path.home())
+        self.assertEqual([home + "/bin/record", "-x", "--out", home + "/Recordings"],
+                         module.command_for("command:Record fast", profile={"commands": [self.RECORD]}))
+
+    def test_command_names_match_ignoring_case_and_spacing(self):
+        self.assertIsNotNone(module.command_for("command:  record   FAST ", profile={"commands": [self.RECORD]}))
+
+    def test_unknown_and_malformed_commands_do_not_run(self):
+        profile = {"commands": [
+            {"name": "Shell", "command": "rm -rf ~"}, {"name": "Empty", "command": []},
+            {"name": "Blank", "command": [""]}, {"name": "Mixed", "command": ["echo", 1]},
+            {"name": "<b>Bold</b>", "command": ["echo"]}, {"name": "x" * 25, "command": ["echo"]},
+            {"command": ["echo"]}, "echo"]}
+        for name in ("Shell", "Empty", "Blank", "Mixed", "<b>Bold</b>", "x" * 25, "Missing"):
+            self.assertIsNone(module.command_for("command:" + name, profile=profile))
+        self.assertEqual([], module.custom_commands(profile))
+        self.assertEqual([], module.custom_commands({"commands": "echo"}))
+        self.assertIsNone(module.command_for("command:Record fast"))
+
+    def test_commands_are_assignable_and_labelled_by_name(self):
+        path = self.with_profile({"keys": [module.blank_key(0)], "commands": [self.RECORD]})
+        with mock.patch.object(module, "desktop_applications", return_value=[]):
+            options = module.action_catalog()
+        self.assertIn({"value": "command:Record fast", "label": "Command · Record fast", "icon": ""}, options)
+        module.set_control_action("keys", 0, "action", "command:Record fast")
+        key = module.json.loads(path.read_text())["keys"][0]
+        self.assertEqual(("command:Record fast", "Record fast"), (key["action"], key["label"]))
+        with self.assertRaisesRegex(ValueError, "Unsupported action"):
+            module.set_control_action("keys", 0, "action", "command:Missing")
+
+    def test_command_icon_is_a_file_under_home_or_an_icon_name(self):
+        with tempfile.TemporaryDirectory() as home, mock.patch.dict(module.os.environ, {"HOME": home}):
+            icon = pathlib.Path(home) / "record.png"; icon.write_bytes(b"png")
+            self.with_profile({"commands": [dict(self.RECORD, icon="~/record.png")]})
+            self.assertEqual(str(icon), module.action_icon("command:Record fast"))
+        with mock.patch.object(module, "resolve_icon", return_value="/icons/record.svg") as resolve:
+            self.with_profile({"commands": [dict(self.RECORD, icon="media-record")]})
+            self.assertEqual("/icons/record.svg", module.action_icon("command:Record fast"))
+            resolve.assert_called_with("media-record")
 
 
 def usb_light_report(body, kind=0x00, index=0, total=1):

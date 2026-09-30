@@ -134,6 +134,26 @@ onto a 120×120 hardware tile. Built-in functions keep the plugin's
 custom artwork, and missing application icons fall back to a generated initial
 tile instead of leaving the key blank.
 
+## Custom commands
+
+To run a script of your own, such as the command behind a Hyprland binding,
+add it to the profile's `commands` list:
+
+```json
+"commands": [
+  {"name": "Record fast", "command": ["~/.local/bin/record-meet-toggle", "-x", "-t"],
+   "icon": "~/.config/elgato-control/icons/record.png"}
+]
+```
+
+Each command then appears in every action picker as **Command · Record fast**,
+and the CLI assigns it as `command:Record fast`. `command` is an argument list
+that runs without a shell, with a leading `~` expanded in each argument. Names
+are 1–24 characters of plain text. `icon` is optional: an image file or an
+icon name from the icon themes the application icons come from. Without one,
+the key shows the command's initials. The panel assigns commands but does not
+create or edit them, so a command exists only if it is written into the profile.
+
 ## Commands
 
 ```bash

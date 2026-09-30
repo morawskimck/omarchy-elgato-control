@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Run commands defined in the profile from any key, dial, or pedal. Each one is an argument list with an optional icon, runs without a shell, and appears in the action pickers as Command · name.
 - Add Facecam Neo support (`0fd9:0081`): a Facecam page with the camera's exposure, color, lens, and image settings, read from the camera and written with `v4l2-ctl`, plus a privacy switch, a reset to the camera's defaults, and whether an application is streaming from the camera.
 - Show a live preview on the Facecam page while no application uses the camera, in its own QML file so the panel still loads without Qt Multimedia.
 - Save camera settings as named presets, apply them from the panel or a key, and apply the active preset again when the camera reconnects.
