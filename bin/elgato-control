@@ -262,7 +262,11 @@ def usb_light_request(light, payload=None):
         payload = dict(payload)
         if "brightness" in payload: payload["brightness"] = max(1, min(limit, int(payload["brightness"])))
         text = "PUT /elgato/lights " + json.dumps({"numberOfLights": 1, "lights": [payload]}, separators=(",", ":"))
-    state = json.loads(usb_light_exchange(path, text))["lights"][0]
+    try:
+        state = json.loads(usb_light_exchange(path, text))["lights"][0]
+        if not isinstance(state, dict): raise TypeError("light state is not an object")
+    except (KeyError, IndexError, TypeError) as error:
+        raise ValueError("Unexpected Key Light response") from error
     return dict(state, maxBrightness=limit)
 
 def light_request(light, payload=None):
