@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Add Facecam Neo support (`0fd9:0081`): a Facecam page with the camera's exposure, color, lens, and image settings, read from the camera and written with `v4l2-ctl`, plus a privacy switch, a reset to the camera's defaults, and whether an application is streaming from the camera.
+- Show a live preview on the Facecam page while no application uses the camera, in its own QML file so the panel still loads without Qt Multimedia.
+- Save camera settings as named presets, apply them from the panel or a key, and apply the active preset again when the camera reconnects.
+- Add Facecam Privacy, Zoom In, Zoom Out, Autofocus, Reset Picture, Next Preset, and per-preset functions for keys, dials, and pedals. The Privacy key shows whether privacy is on, and the bar icon gets a dot while the camera is live.
+- Add a `facecam` CLI command for the camera's status, settings, functions, and presets.
+- Read the status file directly in the panel instead of starting the helper on every poll, and keep polling it every 2 seconds while the panel is closed so the bar icon stays current.
+
 ## 0.3.1 — 2026-08-20
 
 - Force `Text.PlainText` for Key Light names and other externally supplied panel strings so QML AutoText cannot load markup or remote resources.

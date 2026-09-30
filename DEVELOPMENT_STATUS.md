@@ -45,6 +45,13 @@ Build an Omarchy Shell plugin that uses a Stream Deck as a native Linux control 
 - Added black-background application key artwork generated from installed desktop icons, with custom built-in art and non-blank initial fallbacks.
 - Added native Wave:3 gain, microphone mute, headphone volume/mute, gain presets, default-source selection, and assignable Stream Deck actions.
 
+### Facecam
+
+- Facecams are found in `/sys/class/video4linux` (Elgato vendor, "Facecam" in the product name, capture node index 0). Their settings are standard V4L2 controls read with `v4l2-ctl --list-ctrls-menus` and written with `v4l2-ctl -c`; automatic modes are written before the manual values they unlock, and a manual value its automatic mode overrides is skipped.
+- The camera streams exactly while its video streaming interface has a non-zero alternate setting. The processes holding the video node open name the application; scanning `/proc` costs tens of milliseconds, so the daemon scans when streaming starts and every 30 seconds while it goes on. The shell that runs the daemon also hosts the panel's preview, so a stream held only by that process counts as the preview rather than as live.
+- The daemon reads the controls when the camera connects, after an action, when the panel stamps `facecam.json`, and every 10 seconds. The panel keeps the `facecam` command's own reading until the daemon's is newer.
+- Presets live in the profile under `facecam.presets`; the active preset lives in `~/.local/state/elgato-control/facecam.json`, so applying one does not rewrite the profile and redraw every key.
+
 ## Hardware observed on the development machine
 
 | Device | Identifier | Verified result |
@@ -53,6 +60,7 @@ Build an Omarchy Shell plugin that uses a Stream Deck as a native Linux control 
 | Stream Deck Pedal | USB `0fd9:0086` | Opens through hidapi and reports connected |
 | Key Light Neo Left | mDNS on port 9123 | HTTP state reads succeed |
 | Key Light Neo Right | mDNS on port 9123 | HTTP state reads succeed |
+| Facecam Neo | USB `0fd9:0081`, firmware 1.58 | Controls read and written with `v4l2-ctl`; privacy sends a blank picture |
 
 At the last check both lights were reachable, off, brightness 40, temperature 143 (about 7000 K). The daemon and shell had no plugin-specific warnings.
 
@@ -63,6 +71,7 @@ At the last check both lights were reachable, off, brightness 40, temperature 14
 | `~/.config/omarchy/plugins/io.github.amitcpatel.elgato-control` | Installed plugin source |
 | `~/.config/elgato-control/profile.json` | Mutable user profile |
 | `~/.local/state/elgato-control/status.json` | Daemon status read by the panel |
+| `~/.local/state/elgato-control/facecam.json` | Active Facecam preset and the last change time |
 
 ## Known limitations and future work
 
@@ -73,6 +82,8 @@ At the last check both lights were reachable, off, brightness 40, temperature 14
 5. Profile shape validation is partial; panel-selected actions are validated, but hand-edited colors and array lengths are not schema checked.
 6. Wave vendor-only controls such as Clipguard and low-cut filters are not exposed by ALSA and are not implemented.
 7. Packetization, reconnect, and unreachable-device recovery need broader automated coverage despite the current hardware test pass.
+8. A camera streams to one application at a time: while the Facecam preview runs, a call cannot open the camera, so the preview stops when the panel closes or leaves the Facecam page.
+9. Elgato Camera Hub features beyond the standard V4L2 controls (such as its on-camera presets) use a vendor protocol and are not implemented.
 
 ## Validation commands used
 
