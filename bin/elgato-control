@@ -499,11 +499,16 @@ def action_icon(action):
         return resolve_icon(desktop_entry(action[4:]).get("Icon", ""))
     # A preset key shows the preset glyph over its own name, like an application key.
     if action.startswith("facecam_preset:"): return str(ICONS / "facecam_preset.png")
+    if action.startswith("command:"):
+        try: icon = (find_custom_command(load_profile(), action.split(":", 1)[1]) or {}).get("icon")
+        except (OSError, ValueError): icon = None
+        return resolve_icon(os.path.expanduser(icon)) if isinstance(icon, str) else ""
     return ""
 
 def action_catalog():
     options = [{"value": action, "label": "Function · " + label, "icon": action_icon(action)} for action, label in BUILTIN_ACTIONS]
     options.extend(facecam_preset_options())
+    options.extend(custom_command_options())
     options.extend({"value": action, "label": "Key · " + action_label(action), "icon": action_icon(action)} for action in KEY_ACTIONS)
     options.extend({"value": "app:" + desktop_id, "label": "Application · " + plain_text(name),
                     "icon": action_icon("app:" + desktop_id)}
@@ -515,6 +520,34 @@ def facecam_preset_options():
     except (OSError, ValueError): presets = []
     return [{"value": "facecam_preset:" + preset["name"], "label": "Function · Facecam Preset · " + preset["name"],
              "icon": action_icon("facecam_preset:" + preset["name"])} for preset in presets]
+
+# Commands are argument lists written into the profile by hand. The panel can
+# assign them to controls but not define them, and they run without a shell.
+COMMAND_NAME_LIMIT = 24
+
+def command_name(name):
+    return " ".join(str(name).split())
+
+def custom_commands(profile):
+    """The profile's commands; hand-edited entries of the wrong shape are left out."""
+    commands = profile.get("commands")
+    def valid(entry):
+        if not isinstance(entry, dict): return False
+        name, argv = entry.get("name"), entry.get("command")
+        if not isinstance(name, str) or not name.isprintable() or "<" in name or ">" in name: return False
+        if not 0 < len(command_name(name)) <= COMMAND_NAME_LIMIT: return False
+        return isinstance(argv, list) and bool(argv) and all(isinstance(part, str) for part in argv) and bool(argv[0])
+    return [entry for entry in commands if valid(entry)] if isinstance(commands, list) else []
+
+def find_custom_command(profile, name):
+    key = command_name(name).casefold()
+    return next((entry for entry in custom_commands(profile) if command_name(entry["name"]).casefold() == key), None)
+
+def custom_command_options():
+    try: names = [command_name(entry["name"]) for entry in custom_commands(load_profile())]
+    except (OSError, ValueError): names = []
+    return [{"value": "command:" + name, "label": "Command · " + name, "icon": action_icon("command:" + name)}
+            for name in names]
 
 # Panel firmware decodes 3-component baseline JPEG only; ImageMagick would
 # otherwise emit a 1-channel grayscale file for monochrome artwork.
@@ -636,6 +669,8 @@ def valid_action(action):
     if action in KEY_ACTIONS or any(action == item[0] for item in BUILTIN_ACTIONS): return True
     if action.startswith("facecam_preset:"):
         return find_facecam_preset(load_profile(), action.split(":", 1)[1]) is not None
+    if action.startswith("command:"):
+        return find_custom_command(load_profile(), action.split(":", 1)[1]) is not None
     return action.startswith("app:") and desktop_file_exists(action[4:])
 
 def set_control_action(kind, index, slot, action, page=0):
@@ -655,6 +690,7 @@ def set_pedal_action(index, action):
 def action_label(action):
     if action == "voxtype_push_to_talk": return "VOXtype push-to-talk"
     if action.startswith("facecam_preset:"): return plain_text(action.split(":", 1)[1])
+    if action.startswith("command:"): return plain_text(command_name(action.split(":", 1)[1]))
     if action in KEY_ACTIONS: return KEY_ACTIONS[action].replace("_", " ")
     if action.startswith("app:"):
         return dict(desktop_applications()).get(action[4:], action[4:])
@@ -668,11 +704,14 @@ def write_status(data):
     tmp.write_text(json.dumps(data, indent=2) + "\n")
     os.replace(tmp, STATUS)
 
-def command_for(action, wave=None):
+def command_for(action, wave=None, profile=None):
     home = str(pathlib.Path.home())
     # A Wave that PipeWire lists only as an output has no source id.
     mic_target = str((wave or {}).get("sourceId") or "@DEFAULT_AUDIO_SOURCE@")
     if action in KEY_ACTIONS: return ["wtype", "-k", KEY_ACTIONS[action]]
+    if action.startswith("command:"):
+        entry = find_custom_command(profile or {}, action.split(":", 1)[1])
+        return [os.path.expanduser(part) for part in entry["command"]] if entry else None
     if action.startswith("app:") and desktop_file_exists(action[4:]):
         return ["uwsm-app", "--", "gtk-launch", action[4:]]
     return {
@@ -1456,7 +1495,7 @@ class Daemon:
                 self.hid.feature(d["handle"], [0x03, 0x08, self.brightness])
                 if "lcd" in device_spec(d["productId"]).get("capabilities", []): self.update_lcd(d["handle"])
         else:
-            cmd = command_for(action, self.status.get("wave"))
+            cmd = command_for(action, self.status.get("wave"), self.profile)
             if cmd:
                 try: subprocess.Popen(cmd, start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 except OSError as e: self.status["error"] = str(e)
