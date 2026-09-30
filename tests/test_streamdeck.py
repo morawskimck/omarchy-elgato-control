@@ -251,6 +251,15 @@ class UsbKeyLightTests(unittest.TestCase):
             state = module.light_request(light)
         self.assertEqual({"on": 0, "brightness": 40, "temperature": 238, "maxBrightness": 65}, state)
 
+    def test_unexpected_light_state_is_reported_as_an_invalid_response(self):
+        light = {"transport": "usb", "path": "/dev/hidraw11", "serial": "A"}
+        for reply in ('{"numberOfLights":0}', '{"lights":[]}', '{"lights":["on"]}', '[1]'):
+            with mock.patch.object(module, "validate_usb_light", side_effect=lambda path: path), \
+                 mock.patch.object(module, "USB_LIGHT_INFO", {("/dev/hidraw11", "A"): (module.time.monotonic(), 65)}), \
+                 mock.patch.object(module, "usb_light_exchange", return_value=reply):
+                with self.assertRaises(ValueError, msg=reply):
+                    module.light_request(light)
+
     def test_usb_lights_come_before_network_lights(self):
         usb = {"name": "Key Light Neo", "transport": "usb", "path": "/dev/hidraw11", "serial": "A"}
         with mock.patch.object(module, "discover_usb_lights", return_value=[usb]), \
@@ -354,6 +363,7 @@ class QmlPlainTextTests(unittest.TestCase):
         panel = self.PANEL.read_text()
         bindings = (
             "text: modelData.name; textFormat: Text.PlainText",
+            '"K" : "Unavailable"; textFormat: Text.PlainText',
             "root.selectedLightName(); textFormat: Text.PlainText",
             "root.status.wave.product : \"Wave microphone\"; textFormat: Text.PlainText",
             "root.status.profile || \"Omarchy Default\"; textFormat: Text.PlainText",
