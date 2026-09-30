@@ -27,10 +27,13 @@ Panel {
   readonly property bool hasPedal: status.pedal != null
   // Page 1 is the profile's `keys` list; `pages` holds any further pages.
   property int selectedPage: 0
-  readonly property int pageCount: 1 + (profile.pages || []).length
+  readonly property var extraPages: Array.isArray(profile.pages) ? profile.pages : []
+  readonly property int pageCount: 1 + extraPages.length
   readonly property int livePage: status.page || 0
   readonly property bool hasPages: hasDeck && (deck.capabilities || []).indexOf("pages") >= 0
   readonly property bool hasScreen: hasDeck && (deck.capabilities || []).indexOf("screen") >= 0
+  // Panels without page tabs always edit page 1, whatever tab was last picked.
+  readonly property int editPage: hasPages ? selectedPage : 0
   // A page being added is selected once the reloaded profile contains it.
   property int pendingPage: -1
   onPageCountChanged: {
@@ -57,7 +60,10 @@ Panel {
   ].filter(function(x) { return x !== null })
 
   function selectControl(type, index) { selectedControl = type; selectedIndex = index }
-  function pageKeys(page) { return page === 0 ? (profile.keys || []) : (((profile.pages || [])[page - 1] || {}).keys || []) }
+  function pageKeys(page) {
+    var keys = page === 0 ? profile.keys : (extraPages[page - 1] || {}).keys
+    return Array.isArray(keys) ? keys : []
+  }
   function addPage() {
     if (pageProc.running) return
     pageProc.command = [root.helper, "add-page"]
@@ -79,7 +85,7 @@ Panel {
     return ""
   }
   function saveAction(slot, action) {
-    if (selectedDevice === "streamdeck" && selectedControl === "key") saveProc.command = [helper, "set-key", String(selectedIndex + 1), action, "--page", String(root.selectedPage + 1)]
+    if (selectedDevice === "streamdeck" && selectedControl === "key") saveProc.command = [helper, "set-key", String(selectedIndex + 1), action, "--page", String(root.editPage + 1)]
     else if (selectedDevice === "streamdeck" && selectedControl === "dial") saveProc.command = [helper, "set-dial", String(selectedIndex + 1), slot, action]
     else if (selectedDevice === "pedal") saveProc.command = [helper, "set-pedal", String(selectedIndex + 1), action]
     else return
@@ -288,7 +294,7 @@ Panel {
                 width: parent.width; columns: root.deckColumns; columnSpacing: Style.space(8); rowSpacing: Style.space(8)
                 readonly property real cell: (width - Style.space(8) * (root.deckColumns - 1)) / root.deckColumns
                 Repeater {
-                  model: root.pageKeys(root.selectedPage).slice(0, root.deckKeys)
+                  model: root.pageKeys(root.editPage).slice(0, root.deckKeys)
                   Rectangle {
                     width: keyGrid.cell; height: width; radius: 0
                     clip: true
@@ -297,8 +303,8 @@ Panel {
                     border.color: root.selectedControl === "key" && root.selectedIndex === index ? Color.accent : root.controlBorder
                     Column { anchors.centerIn: parent; width: parent.width - Style.space(10); spacing: Style.space(3)
                       Text { anchors.horizontalCenter: parent.horizontalCenter; text: index + 1; color: Color.muted; font.family: Style.font.family; font.pixelSize: 9 }
-                      Image { anchors.horizontalCenter: parent.horizontalCenter; width: Math.min(Style.space(30), keyGrid.cell * 0.42); height: width; source: root.actionIcon(modelData.action); visible: source.toString() !== ""; fillMode: Image.PreserveAspectFit; smooth: true }
-                      Text { width: parent.width; horizontalAlignment: Text.AlignHCenter; elide: Text.ElideRight; text: root.actionName(modelData.action); textFormat: Text.PlainText; color: Color.foreground; font.family: Style.font.family; font.pixelSize: 9 }
+                      Image { anchors.horizontalCenter: parent.horizontalCenter; width: Math.min(Style.space(30), keyGrid.cell * 0.42); height: width; source: root.actionIcon((modelData || {}).action); visible: source.toString() !== ""; fillMode: Image.PreserveAspectFit; smooth: true }
+                      Text { width: parent.width; horizontalAlignment: Text.AlignHCenter; elide: Text.ElideRight; text: root.actionName((modelData || {}).action); textFormat: Text.PlainText; color: Color.foreground; font.family: Style.font.family; font.pixelSize: 9 }
                     }
                     MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.selectControl("key", index) }
                   }
@@ -418,14 +424,14 @@ Panel {
             width: parent.width * 0.39 - Style.space(14); spacing: Style.space(10)
             Text { text: "ACTION INSPECTOR"; color: Color.muted; font.family: Style.font.family; font.pixelSize: 10; font.bold: true }
             Text {
-              text: root.selectedDevice === "streamdeck" ? (root.selectedControl === "key" ? "Key " + (root.selectedIndex + 1) + (root.pageCount > 1 ? " · Page " + (root.selectedPage + 1) : "") : "Dial " + (root.selectedIndex + 1)) : root.selectedDevice === "pedal" ? ["Left pedal", "Middle pedal", "Right pedal"][root.selectedIndex] : root.selectedDevice === "wave" ? root.waveName : root.selectedLightName(); textFormat: Text.PlainText
+              text: root.selectedDevice === "streamdeck" ? (root.selectedControl === "key" ? "Key " + (root.selectedIndex + 1) + (root.hasPages && root.pageCount > 1 ? " · Page " + (root.editPage + 1) : "") : "Dial " + (root.selectedIndex + 1)) : root.selectedDevice === "pedal" ? ["Left pedal", "Middle pedal", "Right pedal"][root.selectedIndex] : root.selectedDevice === "wave" ? root.waveName : root.selectedLightName(); textFormat: Text.PlainText
               color: Color.foreground; font.family: Style.font.family; font.pixelSize: 15; font.bold: true
             }
             Text { visible: root.selectedDevice === "streamdeck" || root.selectedDevice === "pedal"; width: parent.width; wrapMode: Text.WordWrap; text: "Choose an application, system function, or key. Changes apply immediately."; color: Color.muted; font.family: Style.font.family; font.pixelSize: 10 }
             SearchableDropdown {
               visible: (root.selectedDevice === "streamdeck" && root.selectedControl === "key") || root.selectedDevice === "pedal"
               width: parent.width; label: "On press"; options: root.actionOptions
-              value: root.selectedDevice === "pedal" ? ((root.profile.pedals[root.selectedIndex] || {}).action || "") : ((root.pageKeys(root.selectedPage)[root.selectedIndex] || {}).action || "")
+              value: root.selectedDevice === "pedal" ? ((root.profile.pedals[root.selectedIndex] || {}).action || "") : ((root.pageKeys(root.editPage)[root.selectedIndex] || {}).action || "")
               onChanged: function(action) { root.saveAction("action", action) }
             }
             Column {

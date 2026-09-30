@@ -375,6 +375,18 @@ class StreamDeckNeoTests(unittest.TestCase):
             daemon.decorate(self.neo())
         self.assertEqual(["page1_key0", "page1_key1", "page1_key2"] + [""] * 5, drawn)
 
+    def test_malformed_key_entries_draw_blank_and_do_nothing(self):
+        profile = paged_profile(pages=1)
+        profile["keys"][1] = None
+        daemon = self.make_daemon(profile)
+        drawn = []
+        with mock.patch.object(module.Daemon, "key_image", lambda self, dev, index, key, spec: drawn.append(key["action"])), \
+             mock.patch.object(module.Daemon, "update_screen"):
+            daemon.decorate(self.neo())
+        daemon.parse_deck(neo_report(keys=[1]), self.neo())
+        self.assertEqual("", drawn[1])
+        self.assertEqual([], daemon.actions)
+
     def test_live_page_follows_its_keys_when_an_earlier_page_is_removed(self):
         daemon = self.make_daemon(); daemon.page = 2
         old = daemon.profile
@@ -492,6 +504,17 @@ class PageProfileTests(unittest.TestCase):
         self.assertEqual("lock", saved["pages"][0]["keys"][3]["action"])
         self.assertEqual("page0_key3", saved["keys"][3]["action"])
         with self.assertRaises(ValueError): module.set_control_action("keys", 0, "action", "lock", page=2)
+
+    def test_malformed_pages_read_as_empty(self):
+        self.assertEqual(1, module.page_count({"pages": {"2": []}}))
+        self.assertEqual([], module.page_keys({"keys": "abc"}, 0))
+        self.assertEqual([], module.page_keys({"pages": ["abc"]}, 1))
+        self.assertEqual([], module.page_keys({"pages": [{"keys": 5}]}, 1))
+
+    def test_a_page_cannot_be_added_to_malformed_pages(self):
+        path = self.with_profile({"keys": [], "pages": {"2": []}})
+        with self.assertRaises(ValueError): module.add_page()
+        self.assertEqual({"2": []}, module.json.loads(path.read_text())["pages"])
 
     def test_key_slots_grow_on_every_page(self):
         profile = {"keys": [], "pages": [{"keys": []}]}
@@ -710,9 +733,17 @@ class QmlPlainTextTests(unittest.TestCase):
 
     def test_key_editor_reads_and_saves_the_selected_page(self):
         panel = self.PANEL.read_text()
-        self.assertIn("model: root.pageKeys(root.selectedPage).slice(0, root.deckKeys)", panel)
-        self.assertIn('"--page", String(root.selectedPage + 1)', panel)
-        self.assertIn("(root.pageKeys(root.selectedPage)[root.selectedIndex] || {}).action", panel)
+        self.assertIn("model: root.pageKeys(root.editPage).slice(0, root.deckKeys)", panel)
+        self.assertIn('"--page", String(root.editPage + 1)', panel)
+        self.assertIn("(root.pageKeys(root.editPage)[root.selectedIndex] || {}).action", panel)
+
+    def test_editor_reads_malformed_pages_as_empty(self):
+        panel = self.PANEL.read_text()
+        self.assertIn("readonly property var extraPages: Array.isArray(profile.pages) ? profile.pages : []", panel)
+        self.assertIn("return Array.isArray(keys) ? keys : []", panel)
+
+    def test_panels_without_page_tabs_edit_page_one(self):
+        self.assertIn("readonly property int editPage: hasPages ? selectedPage : 0", self.PANEL.read_text())
 
     def test_page_tabs_appear_only_on_panels_that_can_flip_pages(self):
         panel = self.PANEL.read_text()
