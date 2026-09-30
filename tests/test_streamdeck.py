@@ -181,6 +181,17 @@ class DeviceModelTests(unittest.TestCase):
         self.assertEqual(str(artwork), module.action_icon("wave_mute"))
         self.assertEqual(artwork, module.rendered_key_image("wave_mute", "Wave Microphone Mute", [220, 65, 65]))
 
+    def test_wave_gain_step_is_refused_when_the_gain_is_unknown(self):
+        wave = dict(self.wave_neo(), gainRaw=None)
+        with mock.patch.object(module, "set_alsa_control") as setter:
+            with self.assertRaisesRegex(RuntimeError, "gain"):
+                module.perform_wave_action(wave, "wave_gain_up")
+        setter.assert_not_called()
+
+    def test_mic_actions_use_the_default_source_when_the_wave_has_no_input(self):
+        self.assertEqual(["wpctl", "set-mute", "@DEFAULT_AUDIO_SOURCE@", "toggle"],
+                         module.command_for("mic_mute", {"sourceId": None, "card": 0}))
+
     def test_wave_push_to_default_uses_detected_source(self):
         wave = {"card": 2, "gainRaw": 40, "sourceId": 89}
         with mock.patch.object(module, "set_default_wave_source") as setter:
