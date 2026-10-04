@@ -151,7 +151,6 @@ USB_LIGHT_PRODUCTS = {0x00A0: "Key Light Neo"}
 USB_LIGHT_REPORT, USB_LIGHT_BODY, USB_LIGHT_TRAILER = 512, 505, 0x03
 USB_LIGHT_REQUEST, USB_LIGHT_OK = 0x03, 0x00
 USB_LIGHT_INFO = {}
-USB_LIGHT_INFO_TTL = 60.0
 
 def hidraw_ids(uevent):
     fields = dict(line.split("=", 1) for line in uevent.splitlines() if "=" in line)
@@ -242,22 +241,28 @@ def usb_light_exchange(path, text, timeout=0.5, lock_timeout=2.0):
         return read_usb_light_response(read_report)
     finally: os.close(fd)
 
+def usb_light_connection(path):
+    """The HID device behind a hidraw node. The kernel numbers it anew each
+    time the light is connected, so it tells a reconnected light apart."""
+    return os.path.basename(os.path.realpath(HIDRAW_SYSFS / pathlib.Path(path).name / "device"))
+
 def usb_light_limit(light, path):
     """The light's brightness ceiling, which depends on its power source.
 
-    The firmware rejects a brightness above it as invalid.
+    The firmware rejects a brightness above it as invalid. It is read once per
+    connection: every accessory-info request makes the light send an input
+    event, and polling it kept the desktop from ever going idle.
     """
-    key = (path, light.get("serial", ""))
-    cached = USB_LIGHT_INFO.get(key)
-    if not cached or time.monotonic() - cached[0] > USB_LIGHT_INFO_TTL:
+    key = (path, light.get("serial", ""), usb_light_connection(path))
+    if key not in USB_LIGHT_INFO:
         # A light that answers /elgato/lights stays usable without its
         # accessory info; an unresponsive one still raises TimeoutError.
         try:
             info = json.loads(usb_light_exchange(path, "GET /elgato/accessory-info"))
             limit = int((info.get("power-info") or {}).get("maximumBrightness") or 100)
         except (RuntimeError, ValueError, TypeError, AttributeError): limit = 100
-        cached = USB_LIGHT_INFO[key] = (time.monotonic(), max(1, min(100, limit)))
-    return cached[1]
+        USB_LIGHT_INFO[key] = max(1, min(100, limit))
+    return USB_LIGHT_INFO[key]
 
 def usb_light_request(light, payload=None):
     path = validate_usb_light(light.get("path", ""))
