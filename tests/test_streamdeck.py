@@ -181,6 +181,24 @@ class UsbKeyLightTests(unittest.TestCase):
         device.mkdir(parents=True)
         (device / "uevent").write_text("DRIVER=hid-generic\nHID_ID=%s\nHID_NAME=Elgato\nHID_UNIQ=%s\n" % (hid_id, serial))
 
+    def connect(self, root, name, hid_device):
+        """Point a hidraw node at a HID device, as the kernel does on every connection."""
+        (root / hid_device).mkdir(exist_ok=True)
+        link = root / name / "device"
+        link.parent.mkdir(exist_ok=True)
+        if link.is_symlink(): link.unlink()
+        link.symlink_to(root / hid_device)
+
+    def light_replies(self, *ceilings):
+        """Answer each accessory-info request with the next ceiling, repeating the last."""
+        ceilings = list(ceilings)
+        state = '{"numberOfLights":1,"lights":[{"on":0,"brightness":40,"temperature":238}]}'
+        def reply(path, text):
+            if text != "GET /elgato/accessory-info": return state
+            ceiling = ceilings.pop(0) if len(ceilings) > 1 else ceilings[0]
+            return '{"power-info":{"maximumBrightness":%d}}' % ceiling
+        return reply
+
     def test_request_fits_one_framed_report(self):
         frames = module.usb_light_frames("GET /elgato/lights")
         self.assertEqual(1, len(frames))
@@ -251,11 +269,44 @@ class UsbKeyLightTests(unittest.TestCase):
             state = module.light_request(light)
         self.assertEqual({"on": 0, "brightness": 40, "temperature": 238, "maxBrightness": 65}, state)
 
+    def test_brightness_ceiling_is_not_read_again_while_the_light_stays_connected(self):
+        # Every accessory-info request makes the light send an input event, so
+        # re-reading it on a timer kept the desktop from ever going idle.
+        light = {"transport": "usb", "path": "/dev/hidraw11", "serial": "A"}
+        clock = [0.0]
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            self.connect(root, "hidraw11", "0003:0FD9:00A0.0018")
+            with mock.patch.object(module, "HIDRAW_SYSFS", root), \
+                 mock.patch.object(module, "validate_usb_light", side_effect=lambda path: path), \
+                 mock.patch.object(module, "USB_LIGHT_INFO", {}), \
+                 mock.patch.object(module.time, "monotonic", side_effect=lambda: clock[0]), \
+                 mock.patch.object(module, "usb_light_exchange", side_effect=self.light_replies(65)) as exchange:
+                module.light_request(light)
+                clock[0] = 3600.0
+                self.assertEqual(65, module.light_request(light)["maxBrightness"])
+        self.assertEqual(["GET /elgato/accessory-info", "GET /elgato/lights", "GET /elgato/lights"],
+                         [call.args[1] for call in exchange.call_args_list])
+
+    def test_brightness_ceiling_is_read_again_when_the_light_reconnects(self):
+        # A light plugged into another power source comes back with another ceiling.
+        light = {"transport": "usb", "path": "/dev/hidraw11", "serial": "A"}
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            with mock.patch.object(module, "HIDRAW_SYSFS", root), \
+                 mock.patch.object(module, "validate_usb_light", side_effect=lambda path: path), \
+                 mock.patch.object(module, "USB_LIGHT_INFO", {}), \
+                 mock.patch.object(module, "usb_light_exchange", side_effect=self.light_replies(65, 100)):
+                self.connect(root, "hidraw11", "0003:0FD9:00A0.0018")
+                self.assertEqual(65, module.light_request(light)["maxBrightness"])
+                self.connect(root, "hidraw11", "0003:0FD9:00A0.0019")
+                self.assertEqual(100, module.light_request(light)["maxBrightness"])
+
     def test_unexpected_light_state_is_reported_as_an_invalid_response(self):
         light = {"transport": "usb", "path": "/dev/hidraw11", "serial": "A"}
         for reply in ('{"numberOfLights":0}', '{"lights":[]}', '{"lights":["on"]}', '[1]'):
             with mock.patch.object(module, "validate_usb_light", side_effect=lambda path: path), \
-                 mock.patch.object(module, "USB_LIGHT_INFO", {("/dev/hidraw11", "A"): (module.time.monotonic(), 65)}), \
+                 mock.patch.object(module, "USB_LIGHT_INFO", {}), \
                  mock.patch.object(module, "usb_light_exchange", return_value=reply):
                 with self.assertRaises(ValueError, msg=reply):
                     module.light_request(light)
